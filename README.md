@@ -23,7 +23,3 @@ The user specifies the outcome. GeoAgent determines the relevant resources, loca
 - **Autonomous reassessment:** Missions can revisit changing conditions and replan affected work when a material change occurs.
 - **Parallel Mission isolation:** Multiple active Missions can operate independently while sharing only explicitly authorized organizational data.
 - **Cross-Mission operations Q&A:** A later Master Operations Agent can retrieve and explain persisted state across Missions without merging their private execution contexts.
-
-## Demonstration scenario
-
-The initial demonstration uses a fictional Kerala goods-transport operation with synthetic organizational data and real geographic context. It is a concrete example of GeoAgent's broader purpose: autonomous, geospatially informed operational planning across different industries and data sources.

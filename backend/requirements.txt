@@ -1,0 +1,13 @@
+# Agent framework and Gemini integration
+google-adk>=2.0,<3.0
+google-genai>=1.0,<2.0
+
+# HTTP API
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+
+# Google Cloud persistence
+google-cloud-firestore>=2.19,<3.0
+
+# Local configuration
+python-dotenv>=1.0,<2.0

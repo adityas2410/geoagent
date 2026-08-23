@@ -10,6 +10,27 @@ For example:
 
 The user specifies the outcome. GeoAgent determines the relevant resources, locations, deadlines, routes, risks, calculations, and follow-up actions.
 
+## Agent architecture
+
+Each Mission runs one isolated Google ADK collaborative agent team:
+
+```text
+Mission Manager
+├── Organizational Data Agent
+├── Geospatial Intelligence Agent
+└── Operational Planning and Validation Agent
+```
+
+The **Mission Manager** is the user-facing coordinator. It delegates work, resolves specialist findings, requests clarification when essential information cannot be discovered, and publishes the final validated plan. Its application tools are `load_mission_state`, `request_clarification`, and `publish_plan`; ADK also generates one delegation tool for each declared subagent.
+
+The three specialists are leaf agents using `mode="single_turn"`. They do not interact with the user:
+
+- **Organizational Data Agent:** uses `list_authorized_sources`, `inspect_source_schema`, and read-only `query_source` to discover relevant organizational facts without hard-coded domain schemas.
+- **Geospatial Intelligence Agent:** uses `geocode_locations`, `search_places`, `compute_routes`, and `compute_route_matrix` to obtain physical-world facts from Google Maps capabilities.
+- **Operational Planning and Validation Agent:** uses deterministic `optimize_assignments`, `calculate_plan_metrics`, and `validate_plan` functions to build and check candidate plans. It cannot publish a plan.
+
+For human input, only the Mission Manager may call `request_clarification`. That action stores an open-ended question, places the Mission in `awaiting_input`, and stops work until the user responds through the same Mission session. Backend callbacks persist real agent and tool events for the UI; event recording is infrastructure, not an agent-controlled tool.
+
 ## Features
 
 - **Mission-based operations:** Each objective runs as its own Mission with isolated state, activity, plan, and multi-agent execution context.

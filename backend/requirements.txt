@@ -11,3 +11,4 @@ google-cloud-firestore>=2.19,<3.0
 
 # Local configuration
 python-dotenv>=1.0,<2.0
+pydantic>=2.12,<3.0

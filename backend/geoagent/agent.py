@@ -1,0 +1,414 @@
+"""Defines the Mission Manager, its three agents, and their empty tools."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Literal
+
+from dotenv import load_dotenv
+from google.adk import Agent
+from google.adk.tools.tool_context import ToolContext
+from pydantic import BaseModel, Field
+
+
+# Load GOOGLE_API_KEY from backend/.env.
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
+# Gemini model used by all four agents.
+MODEL = "gemini-3.5-flash"
+
+
+# JSON schemas used when the Mission Manager calls each agent.
+
+
+class OrganizationalDataRequest(BaseModel):
+    """[Organizational Data Agent input_schema] JSON sent by the manager."""
+
+    objective: str
+    questions: list[str] = Field(default_factory=list)
+
+
+class OrganizationalDataFindings(BaseModel):
+    """[Organizational Data Agent output_schema] Structured JSON returned."""
+
+    sources_inspected: list[str] = Field(default_factory=list)
+    facts: list[dict[str, Any]] = Field(default_factory=list)
+    constraints: list[dict[str, Any]] = Field(default_factory=list)
+    locations: list[dict[str, Any]] = Field(default_factory=list)
+    unresolved: list[str] = Field(default_factory=list)
+
+
+class GeospatialRequest(BaseModel):
+    """[Geospatial Intelligence Agent input_schema] JSON sent by the manager."""
+
+    objective: str
+    locations: list[dict[str, Any]] = Field(default_factory=list)
+    questions: list[str] = Field(default_factory=list)
+    constraints: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class GeospatialFindings(BaseModel):
+    """[Geospatial Intelligence Agent output_schema] Structured JSON returned."""
+
+    resolved_locations: list[dict[str, Any]] = Field(default_factory=list)
+    routes: list[dict[str, Any]] = Field(default_factory=list)
+    travel_matrix: dict[str, Any] | None = None
+    unresolved: list[str] = Field(default_factory=list)
+
+
+class PlanningRequest(BaseModel):
+    """[Planning and Validation Agent input_schema] JSON sent by the manager."""
+
+    objective: str
+    organizational_facts: list[dict[str, Any]] = Field(default_factory=list)
+    geospatial_facts: list[dict[str, Any]] = Field(default_factory=list)
+    constraints: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class PlanningFindings(BaseModel):
+    """[Planning and Validation Agent output_schema] Structured JSON returned."""
+
+    candidate_plan: dict[str, Any] | None = None
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    violations: list[dict[str, Any]] = Field(default_factory=list)
+    feasible: bool = False
+    unresolved: list[str] = Field(default_factory=list)
+
+
+class MissionManagerResult(BaseModel):
+    """[Mission Manager output_schema] Structured JSON returned to the backend."""
+
+    status: Literal["awaiting_input", "completed", "failed"]
+    mission_name: str | None = None
+    summary: str
+    question: str | None = None
+    plan: dict[str, Any] | None = None
+
+
+# Mission Manager tools
+# ADK supplies ToolContext automatically. The model never supplies a mission ID.
+# Empty tools raise an error until their real implementations are added.
+
+
+def load_mission_state(tool_context: ToolContext) -> dict[str, Any]:
+    """Load the persisted state for the current Mission.
+
+    Returns the Mission objective, lifecycle status, findings, clarification
+    state, and any published plan. The Mission identity comes from the current
+    ADK session and is never selected by the model.
+    """
+    raise NotImplementedError("Mission persistence is not implemented yet.")
+
+
+def request_clarification(
+    question: str,
+    reason: str,
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Pause the current Mission and request one open-ended answer from its user.
+
+    The implementation must persist the question, set the Mission status to
+    ``awaiting_input``, and prevent further Mission work until a user response
+    is submitted through the same Mission session.
+
+    Args:
+        question: The single concise question to show the user.
+        reason: Why the missing information is essential to planning.
+    """
+    raise NotImplementedError("Mission clarification persistence is not implemented yet.")
+
+
+def publish_plan(
+    plan: dict[str, Any],
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Validate and persist the final plan for the current Mission.
+
+    Args:
+        plan: The complete operational plan supported by specialist findings.
+    """
+    raise NotImplementedError("Mission plan persistence is not implemented yet.")
+
+
+# Organizational Data Agent tools
+# The demo organization's data is in SQLite. SQL is the general database type,
+# so these tools can support other SQL databases later without changing agents.
+
+
+def list_authorized_sources(tool_context: ToolContext) -> dict[str, Any]:
+    """List organizational data sources authorized for the current Mission."""
+    raise NotImplementedError("Workspace data-source authorization is not implemented yet.")
+
+
+def inspect_source_schema(
+    source_id: str,
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Inspect a permitted source's entities, fields, types, and relationships.
+
+    Args:
+        source_id: Identifier returned by ``list_authorized_sources``.
+    """
+    raise NotImplementedError("Data-source schema inspection is not implemented yet.")
+
+
+def query_source(
+    source_id: str,
+    query_spec: dict[str, Any],
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Execute a constrained read-only query against a permitted source.
+
+    Args:
+        source_id: Identifier returned by ``list_authorized_sources``.
+        query_spec: Structured filters, fields, grouping, ordering, and limits.
+    """
+    raise NotImplementedError("Read-only source querying is not implemented yet.")
+
+
+# Geospatial Intelligence Agent tools
+# These will call Google Geocoding, Places, and Routes.
+
+
+def geocode_locations(
+    locations: list[dict[str, Any]],
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Resolve organizational location records to verified coordinates.
+
+    Args:
+        locations: Location identifiers, addresses, or place descriptions.
+    """
+    raise NotImplementedError("Google Geocoding integration is not implemented yet.")
+
+
+def search_places(
+    query: str,
+    location_context: dict[str, Any] | None,
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Find or verify a physical place using Google Places.
+
+    Args:
+        query: Place name or natural-language place query.
+        location_context: Optional geographic bias or restriction.
+    """
+    raise NotImplementedError("Google Places integration is not implemented yet.")
+
+
+def compute_routes(
+    origin: dict[str, Any],
+    destination: dict[str, Any],
+    waypoints: list[dict[str, Any]],
+    constraints: dict[str, Any],
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Compute route geometry, distance, duration, and journey facts.
+
+    Args:
+        origin: Resolved route origin.
+        destination: Resolved route destination.
+        waypoints: Ordered intermediate locations, if any.
+        constraints: Travel mode and operational route constraints.
+    """
+    raise NotImplementedError("Google Routes integration is not implemented yet.")
+
+
+def compute_route_matrix(
+    origins: list[dict[str, Any]],
+    destinations: list[dict[str, Any]],
+    constraints: dict[str, Any],
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Compute travel times and distances between sets of locations.
+
+    Args:
+        origins: Resolved origin locations.
+        destinations: Resolved destination locations.
+        constraints: Travel mode and operational route constraints.
+    """
+    raise NotImplementedError("Google route-matrix integration is not implemented yet.")
+
+
+# Operational Planning and Validation Agent tools
+# These use normal code for optimization, calculations, and validation.
+
+
+def optimize_assignments(
+    tasks: list[dict[str, Any]],
+    resources: list[dict[str, Any]],
+    constraints: list[dict[str, Any]],
+    travel_matrix: dict[str, Any] | None,
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Generate candidate assignments using deterministic optimization.
+
+    Args:
+        tasks: Work items discovered from organizational data.
+        resources: Available resources discovered from organizational data.
+        constraints: Operational constraints to enforce.
+        travel_matrix: Optional geospatial cost matrix.
+    """
+    raise NotImplementedError("Deterministic assignment optimization is not implemented yet.")
+
+
+def calculate_plan_metrics(
+    plan: dict[str, Any],
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Calculate deterministic performance and utilization metrics for a plan.
+
+    Args:
+        plan: Candidate operational plan to measure.
+    """
+    raise NotImplementedError("Plan metric calculation is not implemented yet.")
+
+
+def validate_plan(
+    plan: dict[str, Any],
+    constraints: list[dict[str, Any]],
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Return hard violations, warnings, and feasibility for a candidate plan.
+
+    Args:
+        plan: Candidate operational plan to validate.
+        constraints: Discovered organizational and geospatial constraints.
+    """
+    raise NotImplementedError("Deterministic plan validation is not implemented yet.")
+
+
+# Agents
+# single_turn means an agent returns its JSON result to the Mission Manager and
+# cannot chat with the user. ADK automatically lets the manager call each agent.
+
+
+organizational_data_agent = Agent(
+    name="organizational_data_agent",
+    model=MODEL,
+    mode="single_turn",
+    description=(
+        "Discovers and investigates organizational data authorized for the "
+        "current Mission without assuming a domain or database schema."
+    ),
+    instruction="""
+You are the Organizational Data Agent for one isolated Mission.
+Investigate only the data sources authorized for this Mission. Discover schemas
+before querying and use constrained read-only queries. Extract facts,
+constraints, resources, work items, priorities, deadlines, availability, and
+locations that are relevant to the delegated objective. Never assume logistics
+tables, column names, industries, or Kerala-specific facts. Never ask the user
+questions. Return structured findings and explicitly list unresolved facts for
+the Mission Manager.
+""".strip(),
+    # JSON received from the manager / structured JSON returned to the manager.
+    input_schema=OrganizationalDataRequest,
+    output_schema=OrganizationalDataFindings,
+    tools=[
+        list_authorized_sources,
+        inspect_source_schema,
+        query_source,
+    ],
+)
+
+
+geospatial_intelligence_agent = Agent(
+    name="geospatial_intelligence_agent",
+    model=MODEL,
+    mode="single_turn",
+    description=(
+        "Resolves locations, routes, travel matrices, and relevant "
+        "physical-world context for the current Mission."
+    ),
+    instruction="""
+You are the Geospatial Intelligence Agent for one isolated Mission. Resolve only
+the locations and journey facts required by the delegated objective. Use Google
+geospatial tools rather than guessing coordinates, routes, distances, or travel
+times. Preserve the provenance of organizational records, Google results, and
+simulation data. Never ask the user questions. Return structured findings and
+explicitly list unresolved locations or missing inputs for the Mission Manager.
+""".strip(),
+    input_schema=GeospatialRequest,
+    output_schema=GeospatialFindings,
+    tools=[
+        geocode_locations,
+        search_places,
+        compute_routes,
+        compute_route_matrix,
+    ],
+)
+
+
+planning_validation_agent = Agent(
+    name="planning_validation_agent",
+    model=MODEL,
+    mode="single_turn",
+    description=(
+        "Builds feasible operational candidates and validates them with "
+        "deterministic calculation and optimization tools."
+    ),
+    instruction="""
+You are the Operational Planning and Validation Agent for one isolated Mission.
+Use the supplied organizational and geospatial findings to construct candidate
+operational plans. Use deterministic tools for assignment optimization,
+calculation, and constraint validation. Do not invent missing facts, publish a
+final plan, or ask the user questions. Return the best supported candidate,
+metrics, violations, feasibility, and unresolved requirements to the Mission
+Manager.
+""".strip(),
+    input_schema=PlanningRequest,
+    output_schema=PlanningFindings,
+    tools=[
+        optimize_assignments,
+        calculate_plan_metrics,
+        validate_plan,
+    ],
+)
+
+
+root_agent = Agent(
+    # The Mission Manager is the parent agent and the only user-facing agent.
+    name="mission_manager",
+    model=MODEL,
+    description=(
+        "Owns one Mission objective, coordinates capability-based specialists, "
+        "and publishes one validated operational plan."
+    ),
+    instruction="""
+You are the Mission Manager for exactly one isolated Mission. Own its objective,
+lifecycle, specialist delegation, and final operational plan.
+
+Investigate before deciding. Delegate organizational-data investigation,
+geospatial investigation, and planning/validation to the appropriate specialist
+agents. Resolve conflicts between their structured findings and delegate focused
+follow-up work when needed. Do not expose hidden reasoning.
+
+Only request user clarification after permitted organizational data, existing
+Mission state, geospatial context, and deterministic validation cannot resolve
+an essential fact. When clarification is unavoidable, call
+request_clarification exactly once with one concise open-ended question and
+return status awaiting_input. Otherwise publish only a feasible, validated plan
+using publish_plan and return status completed. Never create another Mission.
+""".strip(),
+    # Structured JSON tells the backend whether to wait, finish, or report failure.
+    output_schema=MissionManagerResult,
+    tools=[
+        load_mission_state,
+        request_clarification,
+        publish_plan,
+    ],
+    # ADK automatically gives the manager a tool for each agent in this list.
+    sub_agents=[
+        organizational_data_agent,
+        geospatial_intelligence_agent,
+        planning_validation_agent,
+    ],
+)
+
+
+__all__ = [
+    "geospatial_intelligence_agent",
+    "organizational_data_agent",
+    "planning_validation_agent",
+    "root_agent",
+]

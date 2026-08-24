@@ -15,9 +15,9 @@ sys.path.insert(0, str(BACKEND_DIRECTORY / "demo_data"))
 from google.adk.tools.function_tool import FunctionTool  # noqa: E402
 
 from build_demo_db import build_database  # noqa: E402
-from geoagent.data_sources.agent_tools import inspect_source_schema  # noqa: E402
-from geoagent.data_sources.agent_tools import list_authorized_sources  # noqa: E402
-from geoagent.data_sources.agent_tools import query_source  # noqa: E402
+from geoagent.data_sources.organizational_data_tools import inspect_source_schema  # noqa: E402
+from geoagent.data_sources.organizational_data_tools import list_authorized_sources  # noqa: E402
+from geoagent.data_sources.organizational_data_tools import query_source  # noqa: E402
 from geoagent.data_sources.source_files import LocalSourceStorage  # noqa: E402
 from geoagent.data_sources.source_manager import DataSourceService  # noqa: E402
 from geoagent.data_sources.source_manager import configure_data_source_service  # noqa: E402

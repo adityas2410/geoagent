@@ -1,4 +1,4 @@
-"""ADK tools owned by the Organizational Data Agent."""
+"""Tools owned by the Organizational Data Agent."""
 
 from __future__ import annotations
 

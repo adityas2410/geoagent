@@ -10,6 +10,10 @@ from google.adk import Agent
 from google.adk.tools.tool_context import ToolContext
 from pydantic import BaseModel, Field
 
+from .data_sources.agent_tools import inspect_source_schema
+from .data_sources.agent_tools import list_authorized_sources
+from .data_sources.agent_tools import query_source
+
 
 # Load GOOGLE_API_KEY from backend/.env.
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
@@ -128,42 +132,6 @@ def publish_plan(
         plan: The complete operational plan supported by specialist findings.
     """
     raise NotImplementedError("Mission plan persistence is not implemented yet.")
-
-
-# Organizational Data Agent tools
-# The demo organization's data is in SQLite. SQL is the general database type,
-# so these tools can support other SQL databases later without changing agents.
-
-
-def list_authorized_sources(tool_context: ToolContext) -> dict[str, Any]:
-    """List organizational data sources authorized for the current Mission."""
-    raise NotImplementedError("Workspace data-source authorization is not implemented yet.")
-
-
-def inspect_source_schema(
-    source_id: str,
-    tool_context: ToolContext,
-) -> dict[str, Any]:
-    """Inspect a permitted source's entities, fields, types, and relationships.
-
-    Args:
-        source_id: Identifier returned by ``list_authorized_sources``.
-    """
-    raise NotImplementedError("Data-source schema inspection is not implemented yet.")
-
-
-def query_source(
-    source_id: str,
-    query_spec: dict[str, Any],
-    tool_context: ToolContext,
-) -> dict[str, Any]:
-    """Execute a constrained read-only query against a permitted source.
-
-    Args:
-        source_id: Identifier returned by ``list_authorized_sources``.
-        query_spec: Structured filters, fields, grouping, ordering, and limits.
-    """
-    raise NotImplementedError("Read-only source querying is not implemented yet.")
 
 
 # Geospatial Intelligence Agent tools

@@ -10,6 +10,16 @@ For example:
 
 The user specifies the outcome. GeoAgent determines the relevant resources, locations, deadlines, routes, risks, calculations, and follow-up actions.
 
+## Synthetic demo data
+
+Generate the reproducible Kerala goods-transport SQLite database from the repository root:
+
+```bash
+python backend/demo_data/build_demo_db.py --planning-date 2026-08-25
+```
+
+The generated `backend/data/geoagent_demo.db` is intentionally gitignored. Its committed schema and builder contain synthetic organizational records only; routes and Mission outputs are produced by GeoAgent rather than stored in the source database.
+
 ## Agent architecture
 
 Each Mission runs one isolated Google ADK collaborative agent team:

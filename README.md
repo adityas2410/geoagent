@@ -36,6 +36,26 @@ curl -F "name=Kerala Operations" -F "file=@backend/data/geoagent_demo.db" http:/
 
 Local development stores uploaded sources under `backend/data/sources`. Set `GEOAGENT_SOURCE_STORAGE=gcs` and `GEOAGENT_SOURCE_BUCKET` in Cloud Run; connection metadata is always stored under the Workspace in the named Firestore database `geoagentdb`.
 
+## Workspace and Mission workflow
+
+A Workspace holds connected organizational data and can contain multiple independent Missions. Connecting a source does not start planning.
+
+```text
+Create or open a Workspace
+  -> connect one or more organizational data sources
+  -> enter one Mission objective
+  -> optionally limit which connected sources the Mission may use
+  -> start the Mission
+  -> Mission Manager coordinates the specialist agents
+  -> receive a clarification question or a completed validated plan
+```
+
+If the user does not select sources, the new Mission is authorized to use all currently connected sources in that Workspace. The backend saves those authorized source IDs with the Mission so later source connections do not silently change an existing Mission.
+
+Starting a Mission is a planning action, not execution of the real-world operation. The production backend creates the initial Mission record and ADK session, then runs the Mission Manager. During backend testing, the same production endpoints are called directly; the frontend later calls them when the user presses **Start Mission**.
+
+If clarification is required, the Mission enters `awaiting_input`. The user's answer resumes the same Mission and ADK session. A completed Mission stores its validated plan and events in Firestore.
+
 ## Organizational data architecture
 
 GeoAgent keeps operational data separate from its own application state:
@@ -59,7 +79,7 @@ When the Organizational Data Agent reads a source:
 
 ```text
 agent.py
-  -> agent_tools.py checks the Mission's permitted source IDs
+  -> organizational_data_tools.py checks the Mission's permitted source IDs
   -> source_manager.py coordinates access
   -> source_records.py loads connection metadata
   -> source_files.py retrieves the SQLite file
@@ -71,7 +91,7 @@ The database-related Python files have distinct responsibilities:
 | File | Responsibility |
 |---|---|
 | `backend/geoagent/app.py` | HTTP endpoints for uploading and listing connected sources. |
-| `backend/geoagent/data_sources/agent_tools.py` | The three ADK tools: list sources, inspect schema, and query a source. |
+| `backend/geoagent/data_sources/organizational_data_tools.py` | The Organizational Data Agent's three tools: list sources, inspect schema, and query a source. |
 | `backend/geoagent/data_sources/source_manager.py` | Coordinates validation, storage, registration, Mission source checks, and queries. |
 | `backend/geoagent/data_sources/sqlite_source.py` | Validates SQLite, discovers its schema, and compiles safe read-only queries. |
 | `backend/geoagent/data_sources/source_files.py` | Stores and retrieves SQLite files locally or through Cloud Storage. |
@@ -79,7 +99,7 @@ The database-related Python files have distinct responsibilities:
 | `backend/geoagent/data_sources/data_source_contracts.py` | Defines validated connection, schema, query, result, and error structures. |
 | `backend/geoagent/data_sources/__init__.py` | Marks the directory as a Python package and exports common types; it contains no operational logic. |
 
-`agent.py` imports the three functions from `agent_tools.py` and assigns them to the Organizational Data Agent. It does not contain duplicate implementations.
+`agent.py` imports the three functions from `organizational_data_tools.py` and assigns them to the Organizational Data Agent. It does not contain duplicate implementations.
 
 ## Agent architecture
 

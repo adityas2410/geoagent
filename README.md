@@ -20,6 +20,67 @@ python backend/demo_data/build_demo_db.py --planning-date 2026-08-25
 
 The generated `backend/data/geoagent_demo.db` is intentionally gitignored. Its committed schema and builder contain synthetic organizational records only; routes and Mission outputs are produced by GeoAgent rather than stored in the source database.
 
+## Connect a SQLite source
+
+Start the API from `backend` after configuring `.env`:
+
+```bash
+uvicorn geoagent.app:app --reload
+```
+
+Connect a real SQLite file to a Workspace:
+
+```bash
+curl -F "name=Kerala Operations" -F "file=@backend/data/geoagent_demo.db" http://localhost:8000/api/workspaces/demo-workspace/data-sources/sqlite
+```
+
+Local development stores uploaded sources under `backend/data/sources`. Set `GEOAGENT_SOURCE_STORAGE=gcs` and `GEOAGENT_SOURCE_BUCKET` in Cloud Run; connection metadata is always stored under the Workspace in the named Firestore database `geoagentdb`.
+
+## Organizational data architecture
+
+GeoAgent keeps operational data separate from its own application state:
+
+- **SQLite** contains the organization's operational records, such as jobs, resources, locations, availability, and rules.
+- **Cloud Storage** holds uploaded SQLite files in production because Cloud Run's local filesystem is temporary. Local development uses `backend/data/sources` instead.
+- **Firestore** contains only GeoAgent metadata and state: connected-source records, Mission state, events, clarification state, and generated plans. It does not duplicate operational rows from SQLite.
+
+Connecting a SQLite source follows this path:
+
+```text
+UI upload
+  -> app.py receives the file
+  -> source_manager.py coordinates the connection
+  -> sqlite_source.py validates and inspects SQLite
+  -> source_files.py stores the database file
+  -> source_records.py registers its metadata in Firestore
+```
+
+When the Organizational Data Agent reads a source:
+
+```text
+agent.py
+  -> agent_tools.py checks the Mission's permitted source IDs
+  -> source_manager.py coordinates access
+  -> source_records.py loads connection metadata
+  -> source_files.py retrieves the SQLite file
+  -> sqlite_source.py executes a constrained read-only query
+```
+
+The database-related Python files have distinct responsibilities:
+
+| File | Responsibility |
+|---|---|
+| `backend/geoagent/app.py` | HTTP endpoints for uploading and listing connected sources. |
+| `backend/geoagent/data_sources/agent_tools.py` | The three ADK tools: list sources, inspect schema, and query a source. |
+| `backend/geoagent/data_sources/source_manager.py` | Coordinates validation, storage, registration, Mission source checks, and queries. |
+| `backend/geoagent/data_sources/sqlite_source.py` | Validates SQLite, discovers its schema, and compiles safe read-only queries. |
+| `backend/geoagent/data_sources/source_files.py` | Stores and retrieves SQLite files locally or through Cloud Storage. |
+| `backend/geoagent/data_sources/source_records.py` | Stores and retrieves connection metadata through Firestore. |
+| `backend/geoagent/data_sources/data_source_contracts.py` | Defines validated connection, schema, query, result, and error structures. |
+| `backend/geoagent/data_sources/__init__.py` | Marks the directory as a Python package and exports common types; it contains no operational logic. |
+
+`agent.py` imports the three functions from `agent_tools.py` and assigns them to the Organizational Data Agent. It does not contain duplicate implementations.
+
 ## Agent architecture
 
 Each Mission runs one isolated Google ADK collaborative agent team:

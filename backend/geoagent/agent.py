@@ -10,9 +10,9 @@ from google.adk import Agent
 from google.adk.tools.tool_context import ToolContext
 from pydantic import BaseModel, Field
 
-from .data_sources.agent_tools import inspect_source_schema
-from .data_sources.agent_tools import list_authorized_sources
-from .data_sources.agent_tools import query_source
+from .data_sources.organizational_data_tools import inspect_source_schema
+from .data_sources.organizational_data_tools import list_authorized_sources
+from .data_sources.organizational_data_tools import query_source
 
 
 # Load GOOGLE_API_KEY from backend/.env.

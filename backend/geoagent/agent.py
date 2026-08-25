@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from dotenv import load_dotenv
 from google.adk import Agent
+from google.adk.tools.tool_context import ToolContext
 from pydantic import BaseModel, Field
 
 from .data_sources.organizational_data_tools import inspect_source_schema

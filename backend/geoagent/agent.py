@@ -1,4 +1,4 @@
-"""Defines the Mission Manager, its three agents, and their empty tools."""
+"""Defines the Mission Manager and its three specialist agents."""
 
 from __future__ import annotations
 
@@ -7,12 +7,14 @@ from typing import Any, Literal
 
 from dotenv import load_dotenv
 from google.adk import Agent
-from google.adk.tools.tool_context import ToolContext
 from pydantic import BaseModel, Field
 
 from .data_sources.organizational_data_tools import inspect_source_schema
 from .data_sources.organizational_data_tools import list_authorized_sources
 from .data_sources.organizational_data_tools import query_source
+from .mission_manager_tools import load_mission_state
+from .mission_manager_tools import publish_plan
+from .mission_manager_tools import request_clarification
 
 
 # Load GOOGLE_API_KEY from backend/.env.
@@ -87,51 +89,6 @@ class MissionManagerResult(BaseModel):
     summary: str
     question: str | None = None
     plan: dict[str, Any] | None = None
-
-
-# Mission Manager tools
-# ADK supplies ToolContext automatically. The model never supplies a mission ID.
-# Empty tools raise an error until their real implementations are added.
-
-
-def load_mission_state(tool_context: ToolContext) -> dict[str, Any]:
-    """Load the persisted state for the current Mission.
-
-    Returns the Mission objective, lifecycle status, findings, clarification
-    state, and any published plan. The Mission identity comes from the current
-    ADK session and is never selected by the model.
-    """
-    raise NotImplementedError("Mission persistence is not implemented yet.")
-
-
-def request_clarification(
-    question: str,
-    reason: str,
-    tool_context: ToolContext,
-) -> dict[str, Any]:
-    """Pause the current Mission and request one open-ended answer from its user.
-
-    The implementation must persist the question, set the Mission status to
-    ``awaiting_input``, and prevent further Mission work until a user response
-    is submitted through the same Mission session.
-
-    Args:
-        question: The single concise question to show the user.
-        reason: Why the missing information is essential to planning.
-    """
-    raise NotImplementedError("Mission clarification persistence is not implemented yet.")
-
-
-def publish_plan(
-    plan: dict[str, Any],
-    tool_context: ToolContext,
-) -> dict[str, Any]:
-    """Validate and persist the final plan for the current Mission.
-
-    Args:
-        plan: The complete operational plan supported by specialist findings.
-    """
-    raise NotImplementedError("Mission plan persistence is not implemented yet.")
 
 
 # Geospatial Intelligence Agent tools
@@ -356,7 +313,8 @@ Mission state, geospatial context, and deterministic validation cannot resolve
 an essential fact. When clarification is unavoidable, call
 request_clarification exactly once with one concise open-ended question and
 return status awaiting_input. Otherwise publish only a feasible, validated plan
-using publish_plan and return status completed. Never create another Mission.
+using publish_plan with a generated Mission name, concise summary, and complete
+plan, then return status completed. Never create another Mission.
 """.strip(),
     # Structured JSON tells the backend whether to wait, finish, or report failure.
     output_schema=MissionManagerResult,

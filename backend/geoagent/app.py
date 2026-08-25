@@ -18,6 +18,17 @@ from starlette.concurrency import run_in_threadpool
 from .data_sources.data_source_contracts import DataSourceError
 from .data_sources.source_manager import DataSourceService
 from .data_sources.source_manager import get_data_source_service
+from .missions import ClarificationResponse
+from .missions import MissionCreate
+from .missions import MissionError
+from .missions import MissionEventListResponse
+from .missions import MissionListResponse
+from .missions import MissionRecord
+from .missions import MissionService
+from .missions import WorkspaceCreate
+from .missions import WorkspaceListResponse
+from .missions import WorkspaceRecord
+from .missions import get_mission_service
 
 
 app = FastAPI(title="GeoAgent API", version="0.1.0")
@@ -41,10 +52,25 @@ class DataSourceListResponse(BaseModel):
 
 
 def data_source_service_dependency() -> DataSourceService:
+    """Provide the shared organizational data service to API endpoints."""
     return get_data_source_service()
 
 
+def mission_service_dependency() -> MissionService:
+    """Provide the shared Workspace and Mission service to API endpoints."""
+    return get_mission_service()
+
+
 def raise_http_error(error: DataSourceError) -> None:
+    """Convert a safe data-source error into an HTTP response."""
+    raise HTTPException(
+        status_code=error.http_status,
+        detail={"code": error.code, "message": error.message},
+    ) from error
+
+
+def raise_mission_http_error(error: MissionError) -> None:
+    """Convert a safe Workspace or Mission error into an HTTP response."""
     raise HTTPException(
         status_code=error.http_status,
         detail={"code": error.code, "message": error.message},
@@ -53,7 +79,31 @@ def raise_http_error(error: DataSourceError) -> None:
 
 @app.get("/health")
 def health() -> dict[str, str]:
+    """Report that the backend process is available."""
     return {"status": "ok"}
+
+
+@app.post("/api/workspaces", response_model=WorkspaceRecord, status_code=201)
+async def create_workspace(
+    request: WorkspaceCreate,
+    service: MissionService = Depends(mission_service_dependency),
+) -> WorkspaceRecord:
+    """Create a Workspace before sources or Missions are added."""
+    try:
+        return await service.create_workspace(request)
+    except MissionError as error:
+        raise_mission_http_error(error)
+
+
+@app.get("/api/workspaces", response_model=WorkspaceListResponse)
+async def list_workspaces(
+    service: MissionService = Depends(mission_service_dependency),
+) -> dict[str, Any]:
+    """Return the Workspaces available to the application."""
+    try:
+        return {"workspaces": await service.list_workspaces()}
+    except MissionError as error:
+        raise_mission_http_error(error)
 
 
 @app.post(
@@ -66,7 +116,13 @@ async def connect_sqlite_source(
     name: str = Form(min_length=1, max_length=100),
     file: UploadFile = File(),
     service: DataSourceService = Depends(data_source_service_dependency),
+    mission_service: MissionService = Depends(mission_service_dependency),
 ) -> dict[str, Any]:
+    """Validate and connect one uploaded SQLite source to a Workspace."""
+    try:
+        await mission_service.require_workspace(workspace_id)
+    except MissionError as error:
+        raise_mission_http_error(error)
     original_filename = file.filename or "source.sqlite"
     temporary_file = tempfile.NamedTemporaryFile(
         prefix="geoagent-upload-", suffix=".tmp", delete=False
@@ -108,12 +164,116 @@ async def connect_sqlite_source(
     "/api/workspaces/{workspace_id}/data-sources",
     response_model=DataSourceListResponse,
 )
-def list_workspace_sources(
+async def list_workspace_sources(
     workspace_id: str,
     service: DataSourceService = Depends(data_source_service_dependency),
+    mission_service: MissionService = Depends(mission_service_dependency),
 ) -> dict[str, Any]:
+    """Return every connected organizational source in a Workspace."""
     try:
+        await mission_service.require_workspace(workspace_id)
         records = service.list_sources(workspace_id)
+    except MissionError as error:
+        raise_mission_http_error(error)
     except DataSourceError as error:
         raise_http_error(error)
     return {"sources": [record.public_dict() for record in records]}
+
+
+@app.post(
+    "/api/workspaces/{workspace_id}/missions",
+    response_model=MissionRecord,
+    status_code=201,
+)
+async def create_mission(
+    workspace_id: str,
+    request: MissionCreate,
+    service: MissionService = Depends(mission_service_dependency),
+) -> MissionRecord:
+    """Create initial Mission state without starting agent execution."""
+    try:
+        return await service.create_mission(workspace_id, request)
+    except MissionError as error:
+        raise_mission_http_error(error)
+
+
+@app.get(
+    "/api/workspaces/{workspace_id}/missions",
+    response_model=MissionListResponse,
+)
+async def list_missions(
+    workspace_id: str,
+    service: MissionService = Depends(mission_service_dependency),
+) -> dict[str, Any]:
+    """Return every Mission belonging to one Workspace."""
+    try:
+        return {"missions": await service.list_missions(workspace_id)}
+    except MissionError as error:
+        raise_mission_http_error(error)
+
+
+@app.get(
+    "/api/workspaces/{workspace_id}/missions/{mission_id}",
+    response_model=MissionRecord,
+)
+async def get_mission(
+    workspace_id: str,
+    mission_id: str,
+    service: MissionService = Depends(mission_service_dependency),
+) -> MissionRecord:
+    """Return the latest saved state for one Mission."""
+    try:
+        return await service.require_mission(workspace_id, mission_id)
+    except MissionError as error:
+        raise_mission_http_error(error)
+
+
+@app.post(
+    "/api/workspaces/{workspace_id}/missions/{mission_id}/run",
+    response_model=MissionRecord,
+)
+async def run_mission(
+    workspace_id: str,
+    mission_id: str,
+    service: MissionService = Depends(mission_service_dependency),
+) -> MissionRecord:
+    """Run a newly created Mission until completion, clarification, or failure."""
+    try:
+        return await service.run_mission(workspace_id, mission_id)
+    except MissionError as error:
+        raise_mission_http_error(error)
+
+
+@app.post(
+    "/api/workspaces/{workspace_id}/missions/{mission_id}/responses",
+    response_model=MissionRecord,
+)
+async def respond_to_mission(
+    workspace_id: str,
+    mission_id: str,
+    response: ClarificationResponse,
+    service: MissionService = Depends(mission_service_dependency),
+) -> MissionRecord:
+    """Submit an open-ended answer and resume the same Mission session."""
+    try:
+        return await service.respond_to_clarification(
+            workspace_id, mission_id, response
+        )
+    except MissionError as error:
+        raise_mission_http_error(error)
+
+
+@app.get(
+    "/api/workspaces/{workspace_id}/missions/{mission_id}/events",
+    response_model=MissionEventListResponse,
+)
+async def list_mission_events(
+    workspace_id: str,
+    mission_id: str,
+    service: MissionService = Depends(mission_service_dependency),
+) -> dict[str, Any]:
+    """Return safe agent and lifecycle activity for one Mission."""
+    try:
+        return {"events": await service.list_events(workspace_id, mission_id)}
+    except MissionError as error:
+        raise_mission_http_error(error)

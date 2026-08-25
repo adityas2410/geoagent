@@ -28,10 +28,16 @@ Start the API from `backend` after configuring `.env`:
 uvicorn geoagent.app:app --reload
 ```
 
-Connect a real SQLite file to a Workspace:
+Create a Workspace:
 
 ```bash
-curl -F "name=Kerala Operations" -F "file=@backend/data/geoagent_demo.db" http://localhost:8000/api/workspaces/demo-workspace/data-sources/sqlite
+curl -X POST -H "Content-Type: application/json" -d '{"name":"Kerala Operations"}' http://localhost:8000/api/workspaces
+```
+
+Copy the returned `workspace_id`, then connect a real SQLite file to it:
+
+```bash
+curl -F "name=Kerala Operations" -F "file=@backend/data/geoagent_demo.db" http://localhost:8000/api/workspaces/<workspace_id>/data-sources/sqlite
 ```
 
 Local development stores uploaded sources under `backend/data/sources`. Set `GEOAGENT_SOURCE_STORAGE=gcs` and `GEOAGENT_SOURCE_BUCKET` in Cloud Run; connection metadata is always stored under the Workspace in the named Firestore database `geoagentdb`.
@@ -40,19 +46,32 @@ Local development stores uploaded sources under `backend/data/sources`. Set `GEO
 
 A Workspace holds connected organizational data and can contain multiple independent Missions. Connecting a source does not start planning.
 
+GeoAgent has no user accounts or profiles. ADK requires an internal `user_id`, so GeoAgent uses the Workspace ID only to keep each Workspace's sessions isolated.
+
 ```text
 Create or open a Workspace
   -> connect one or more organizational data sources
   -> enter one Mission objective
   -> optionally limit which connected sources the Mission may use
-  -> start the Mission
+  -> create the Mission and its persistent ADK session
+  -> start the Mission's planning run
   -> Mission Manager coordinates the specialist agents
   -> receive a clarification question or a completed validated plan
 ```
 
 If the user does not select sources, the new Mission is authorized to use all currently connected sources in that Workspace. The backend saves those authorized source IDs with the Mission so later source connections do not silently change an existing Mission.
 
-Starting a Mission is a planning action, not execution of the real-world operation. The production backend creates the initial Mission record and ADK session, then runs the Mission Manager. During backend testing, the same production endpoints are called directly; the frontend later calls them when the user presses **Start Mission**.
+Starting a Mission is a planning action, not execution of the real-world operation. The backend deliberately uses two operations:
+
+```text
+POST /api/workspaces/{workspace_id}/missions
+  -> saves the initial Mission and its persistent ADK session
+
+POST /api/workspaces/{workspace_id}/missions/{mission_id}/run
+  -> starts the Mission Manager for that saved Mission
+```
+
+During backend testing, these production endpoints are called directly. The frontend later calls both operations when the user presses **Start Mission**.
 
 If clarification is required, the Mission enters `awaiting_input`. The user's answer resumes the same Mission and ADK session. A completed Mission stores its validated plan and events in Firestore.
 
@@ -90,7 +109,7 @@ The database-related Python files have distinct responsibilities:
 
 | File | Responsibility |
 |---|---|
-| `backend/geoagent/app.py` | HTTP endpoints for uploading and listing connected sources. |
+| `backend/geoagent/app.py` | HTTP endpoints for Workspaces, connected sources, Missions, planning runs, clarification responses, and Mission events. |
 | `backend/geoagent/data_sources/organizational_data_tools.py` | The Organizational Data Agent's three tools: list sources, inspect schema, and query a source. |
 | `backend/geoagent/data_sources/source_manager.py` | Coordinates validation, storage, registration, Mission source checks, and queries. |
 | `backend/geoagent/data_sources/sqlite_source.py` | Validates SQLite, discovers its schema, and compiles safe read-only queries. |
@@ -120,7 +139,7 @@ The three specialists are leaf agents using `mode="single_turn"`. They do not in
 - **Geospatial Intelligence Agent:** uses `geocode_locations`, `search_places`, `compute_routes`, and `compute_route_matrix` to obtain physical-world facts from Google Maps capabilities.
 - **Operational Planning and Validation Agent:** uses deterministic `optimize_assignments`, `calculate_plan_metrics`, and `validate_plan` functions to build and check candidate plans. It cannot publish a plan.
 
-For human input, only the Mission Manager may call `request_clarification`. That action stores an open-ended question, places the Mission in `awaiting_input`, and stops work until the user responds through the same Mission session. Backend callbacks persist real agent and tool events for the UI; event recording is infrastructure, not an agent-controlled tool.
+For human input, only the Mission Manager may call `request_clarification`. That action stores an open-ended question, places the Mission in `awaiting_input`, and stops work until the user responds through the same Mission session. The Mission runner converts real ADK activity into safe agent, tool, result, and state events for the UI without exposing hidden reasoning; event recording is infrastructure, not an agent-controlled tool.
 
 ## Features
 

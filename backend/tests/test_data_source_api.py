@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 
@@ -16,9 +16,25 @@ from fastapi.testclient import TestClient  # noqa: E402
 from build_demo_db import build_database  # noqa: E402
 from geoagent.app import app  # noqa: E402
 from geoagent.app import data_source_service_dependency  # noqa: E402
+from geoagent.app import mission_service_dependency  # noqa: E402
 from geoagent.data_sources.source_files import LocalSourceStorage  # noqa: E402
 from geoagent.data_sources.source_manager import DataSourceService  # noqa: E402
 from geoagent.data_sources.source_records import InMemorySourceRepository  # noqa: E402
+from geoagent.missions import MissionError  # noqa: E402
+from geoagent.missions import WorkspaceRecord  # noqa: E402
+
+
+class WorkspaceGate:
+    async def require_workspace(self, workspace_id: str) -> WorkspaceRecord:
+        if workspace_id != "demo-workspace":
+            raise MissionError("WORKSPACE_NOT_FOUND", "The Workspace was not found.", 404)
+        timestamp = datetime.now(timezone.utc)
+        return WorkspaceRecord(
+            workspace_id=workspace_id,
+            name="Demo Workspace",
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
 
 
 class DataSourceApiTest(unittest.TestCase):
@@ -32,6 +48,7 @@ class DataSourceApiTest(unittest.TestCase):
             storage=LocalSourceStorage(root / "stored"),
         )
         app.dependency_overrides[data_source_service_dependency] = lambda: self.service
+        app.dependency_overrides[mission_service_dependency] = WorkspaceGate
         self.client = TestClient(app)
 
     def tearDown(self) -> None:
@@ -89,6 +106,21 @@ class DataSourceApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 413)
         self.assertEqual(response.json()["detail"]["code"], "SOURCE_TOO_LARGE")
         self.assertEqual(self.service.list_sources("demo-workspace"), [])
+
+    def test_unknown_workspace_is_rejected(self) -> None:
+        response = self.client.post(
+            "/api/workspaces/missing/data-sources/sqlite",
+            data={"name": "Operations"},
+            files={
+                "file": (
+                    "operations.db",
+                    self.database_path.read_bytes(),
+                    "application/vnd.sqlite3",
+                )
+            },
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"]["code"], "WORKSPACE_NOT_FOUND")
 
 
 if __name__ == "__main__":

@@ -75,6 +75,35 @@ During backend testing, these production endpoints are called directly. The fron
 
 If clarification is required, the Mission enters `awaiting_input`. The user's answer resumes the same Mission and ADK session. A completed Mission stores its validated plan and events in Firestore.
 
+## Firestore structure
+
+Firestore alternates between collections, which contain records, and documents, which contain fields and may have child collections. GeoAgent uses this structure:
+
+```text
+workspaces                                      collection
+└── {workspace_id}                              Workspace document
+    ├── data_sources                            collection
+    │   └── {source_id}                         source metadata document
+    └── missions                                collection
+        └── {mission_id}                        Mission document
+            └── events                          collection
+                └── {event_id}                  frontend-safe activity document
+
+adk-session                                     ADK-managed collection
+└── geoagent                                    application document
+    └── users                                   ADK-managed collection
+        └── {workspace_id}                      session-isolation document
+            └── sessions                        ADK-managed collection
+                └── {mission_id}                persistent ADK session document
+                    └── events                  ADK execution-history collection
+```
+
+The Mission document is GeoAgent's authoritative product record. It stores the objective, authorized source IDs, status, clarification, generated name, summary, and final structured plan. Its `events` collection contains the safe agent actions, tool calls, structured results, and state changes intended for the frontend.
+
+ADK's `adk-session` collection is the manager's persistent working context. GeoAgent reuses the Mission ID as the ADK session ID and uses the Workspace ID as ADK's internal `user_id`; this is session isolation only and does not represent a user account. Some identifiers and initial context appear in both places because the product API and ADK runtime have different storage responsibilities.
+
+Source documents contain connection metadata only. The SQLite database itself stays in `backend/data/sources` during local development and moves to Cloud Storage when the deployed backend uses the GCS storage setting.
+
 ## Organizational data architecture
 
 GeoAgent keeps operational data separate from its own application state:

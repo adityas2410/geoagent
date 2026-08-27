@@ -7,7 +7,6 @@ from typing import Any, Literal
 
 from dotenv import load_dotenv
 from google.adk import Agent
-from google.adk.tools.tool_context import ToolContext
 from pydantic import BaseModel, Field
 
 from .data_sources.organizational_data_tools import inspect_source_schema
@@ -25,6 +24,10 @@ from .geospatial_tools import search_places
 from .mission_manager_tools import load_mission_state
 from .mission_manager_tools import publish_plan
 from .mission_manager_tools import request_clarification
+from .mission_manager_tools import request_objective_decision
+from .planning_tools import calculate_plan_metrics
+from .planning_tools import optimize_assignments
+from .planning_tools import validate_plan
 
 
 # Load GOOGLE_API_KEY from backend/.env.
@@ -102,67 +105,26 @@ class PlanningFindings(BaseModel):
 
     candidate_plan: dict[str, Any] | None = None
     metrics: dict[str, Any] = Field(default_factory=dict)
-    violations: list[dict[str, Any]] = Field(default_factory=list)
+    hard_violations: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[dict[str, Any]] = Field(default_factory=list)
     feasible: bool = False
-    unresolved: list[str] = Field(default_factory=list)
+    unresolved: list[dict[str, Any]] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+    proposed_objective: str | None = None
+    provenance: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class MissionManagerResult(BaseModel):
     """[Mission Manager output_schema] Structured JSON returned to the backend."""
 
-    status: Literal["awaiting_input", "completed", "failed"]
+    status: Literal[
+        "awaiting_input", "awaiting_objective_decision", "completed", "failed"
+    ]
     mission_name: str | None = None
     summary: str
     question: str | None = None
+    proposed_objective: str | None = None
     plan: dict[str, Any] | None = None
-
-
-# Operational Planning and Validation Agent tools
-# These use normal code for optimization, calculations, and validation.
-
-
-def optimize_assignments(
-    tasks: list[dict[str, Any]],
-    resources: list[dict[str, Any]],
-    constraints: list[dict[str, Any]],
-    travel_matrix: dict[str, Any] | None,
-    tool_context: ToolContext,
-) -> dict[str, Any]:
-    """Generate candidate assignments using deterministic optimization.
-
-    Args:
-        tasks: Work items discovered from organizational data.
-        resources: Available resources discovered from organizational data.
-        constraints: Operational constraints to enforce.
-        travel_matrix: Optional geospatial cost matrix.
-    """
-    raise NotImplementedError("Deterministic assignment optimization is not implemented yet.")
-
-
-def calculate_plan_metrics(
-    plan: dict[str, Any],
-    tool_context: ToolContext,
-) -> dict[str, Any]:
-    """Calculate deterministic performance and utilization metrics for a plan.
-
-    Args:
-        plan: Candidate operational plan to measure.
-    """
-    raise NotImplementedError("Plan metric calculation is not implemented yet.")
-
-
-def validate_plan(
-    plan: dict[str, Any],
-    constraints: list[dict[str, Any]],
-    tool_context: ToolContext,
-) -> dict[str, Any]:
-    """Return hard violations, warnings, and feasibility for a candidate plan.
-
-    Args:
-        plan: Candidate operational plan to validate.
-        constraints: Discovered organizational and geospatial constraints.
-    """
-    raise NotImplementedError("Deterministic plan validation is not implemented yet.")
 
 
 # Agents
@@ -249,11 +211,17 @@ planning_validation_agent = Agent(
     instruction="""
 You are the Operational Planning and Validation Agent for one isolated Mission.
 Use the supplied organizational and geospatial findings to construct candidate
-operational plans. Use deterministic tools for assignment optimization,
-calculation, and constraint validation. Do not invent missing facts, publish a
-final plan, or ask the user questions. Return the best supported candidate,
-metrics, violations, feasibility, and unresolved requirements to the Mission
-Manager.
+operational plans. Translate findings into the typed, domain-neutral task,
+resource, constraint, location, and matrix arguments required by your tools.
+Use local optimization for generic work. Let optimize_assignments select Google
+Route Optimization only for a compatible vehicle-routing problem. Always
+calculate metrics and independently validate the best candidate.
+
+Try only a bounded set of supported alternatives. If no feasible candidate
+exists, stop and return exact hard violations, grounded recommendations, and
+one achievable proposed objective. Never retry indefinitely, invent missing
+facts, publish an outcome, ask the user questions, or speak directly to the
+user. Return valid structured JSON matching your output schema.
 """.strip(),
     input_schema=PlanningRequest,
     output_schema=PlanningFindings,
@@ -282,19 +250,30 @@ geospatial investigation, and planning/validation to the appropriate specialist
 agents. Resolve conflicts between their structured findings and delegate focused
 follow-up work when needed. Do not expose hidden reasoning.
 
-Only request user clarification after permitted organizational data, existing
-Mission state, geospatial context, and deterministic validation cannot resolve
-an essential fact. When clarification is unavoidable, call
-request_clarification exactly once with one concise open-ended question and
-return status awaiting_input. Otherwise publish only a feasible, validated plan
-using publish_plan with a generated Mission name, concise summary, and complete
-plan, then return status completed. Never create another Mission.
+Always call load_mission_state first. Before delegating to any specialist,
+decide whether the objective is actionable. A short objective such as "Plan
+tomorrow's deliveries" is actionable. If the objective is genuinely vague,
+call request_clarification exactly once with one concise open-ended objective
+question, return status awaiting_input, and stop before delegation. Never ask a
+question while a specialist is working. After the answer resumes this same
+session, combine it with the original objective and proceed without repeating
+the initial clarification gate.
+
+For an actionable objective, investigate organizational data, obtain only the
+relevant geospatial context, and delegate planning and validation. Publish only
+a feasible, independently validated plan using publish_plan. If bounded
+alternatives prove the objective impossible, call request_objective_decision
+once with the exact reason, hard violations, and one achievable proposed
+objective, return status awaiting_objective_decision, and stop. Do not retry,
+publish an invalid plan, or treat infeasibility as clarification. Never create
+another Mission.
 """.strip(),
     # Structured JSON tells the backend whether to wait, finish, or report failure.
     output_schema=MissionManagerResult,
     tools=[
         load_mission_state,
         request_clarification,
+        request_objective_decision,
         publish_plan,
     ],
     # ADK automatically gives the manager a tool for each agent in this list.

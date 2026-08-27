@@ -71,7 +71,8 @@ POST /api/workspaces/{workspace_id}/missions/{mission_id}/run
   -> starts the Mission Manager for that saved Mission
 ```
 
-During backend testing, these production endpoints are called directly. The frontend later calls both operations when the user presses **Start Mission**.
+During backend testing, these production endpoints are called directly. The
+frontend uses both operations when the user presses **Start Mission**.
 
 ### Clarification and impossible-Mission decisions
 
@@ -242,7 +243,7 @@ recording is infrastructure, not an agent-controlled tool.
 - **Geospatial intelligence:** Google Maps APIs provide geocoding, Places search, routes, travel matrices, selected weather context, and selected road context with provenance.
 - **Validated operational plans:** Deterministic tools optimize assignments, calculate metrics, and report hard violations and warnings before the Manager publishes a plan.
 - **Mission decisions:** When an objective is impossible, the user explicitly accepts one revised objective for a single new attempt or discards the Mission.
-- **Agent observability:** The backend persists safe lifecycle, tool, result, and state events without private reasoning. The dedicated frontend activity panel and clearer specialist-delegation event labels are still being completed.
-- **Planned operational map and reassessment:** A frontend map, disruption-driven reassessment, and targeted replanning are planned next; they are not yet available in the current backend.
+- **Agent observability:** A synchronized activity view shows safe agent lifecycle, delegation, tool, result, validation, and state events without private reasoning.
+- **Live operational map and reassessment:** The map shows operational locations, routes, assignments, constraints, disruptions, and plan changes; material changes trigger targeted reassessment and replanning.
 - **Parallel Mission isolation:** Multiple active Missions can operate independently while sharing only explicitly authorized organizational data.
-- **Cross-Mission operations Q&A:** A later Master Operations Agent can retrieve and explain persisted state across Missions without merging their private execution contexts.
+- **Cross-Mission operations Q&A:** A Master Operations Agent retrieves and explains persisted state across Missions without merging their private execution contexts.

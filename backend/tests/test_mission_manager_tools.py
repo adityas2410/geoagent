@@ -18,6 +18,7 @@ from build_demo_db import build_database  # noqa: E402
 from geoagent.mission_manager_tools import load_mission_state  # noqa: E402
 from geoagent.mission_manager_tools import publish_plan  # noqa: E402
 from geoagent.mission_manager_tools import request_clarification  # noqa: E402
+from geoagent.mission_manager_tools import request_objective_decision  # noqa: E402
 from geoagent.missions import MissionCreate  # noqa: E402
 from geoagent.missions import MissionEventRecord  # noqa: E402
 from geoagent.missions import WorkspaceCreate  # noqa: E402
@@ -116,6 +117,25 @@ class MissionManagerToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored.name, "Tomorrow's Operations")
         self.assertIsNotNone(stored.plan)
 
+    async def test_request_objective_decision(self) -> None:
+        mission = await self.create_running_mission()
+        context = self.context(mission.mission_id)
+        result = await request_objective_decision(
+            "Complete the highest-priority work within available capacity.",
+            "Current capacity cannot complete all mandatory work.",
+            [{"code": "CAPACITY_EXCEEDED"}],
+            context,
+        )
+        self.assertEqual(result["status"], "awaiting_objective_decision")
+        self.assertTrue(context.actions.skip_summarization)
+        self.assertEqual(
+            context.state["mission_status"], "awaiting_objective_decision"
+        )
+        stored = await self.service.require_mission(
+            self.workspace.workspace_id, mission.mission_id
+        )
+        self.assertEqual(stored.objective_decision.status, "pending")
+
     def test_adk_tool_declarations_hide_context(self) -> None:
         clarification = FunctionTool(request_clarification)._get_declaration()
         self.assertEqual(
@@ -126,6 +146,11 @@ class MissionManagerToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             set(published.parameters_json_schema["properties"]),
             {"mission_name", "summary", "plan"},
+        )
+        objective = FunctionTool(request_objective_decision)._get_declaration()
+        self.assertEqual(
+            set(objective.parameters_json_schema["properties"]),
+            {"proposed_objective", "reason", "hard_violations"},
         )
 
 

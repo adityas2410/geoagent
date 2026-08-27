@@ -78,6 +78,11 @@ class InMemoryMissionStore:
             key=lambda item: item.created_at,
         )
 
+    async def delete_mission(self, workspace_id: str, mission_id: str) -> None:
+        key = (workspace_id, mission_id)
+        self.missions.pop(key, None)
+        self.events.pop(key, None)
+
     async def transition_mission(
         self,
         workspace_id: str,
@@ -164,12 +169,50 @@ class ClarifyThenPublishRunner:
             )
 
 
-def build_services(root: Path):
+class ObjectiveDecisionRunner:
+    def __init__(self, *, feasible_after_acceptance: bool) -> None:
+        self.service: MissionService | None = None
+        self.calls = 0
+        self.feasible_after_acceptance = feasible_after_acceptance
+
+    async def run_async(self, *, user_id, session_id, new_message):
+        self.calls += 1
+        assert self.service is not None
+        if self.calls == 1 or not self.feasible_after_acceptance:
+            suffix = "highest-priority work" if self.calls == 1 else "one priority task"
+            await self.service.request_objective_decision(
+                user_id,
+                session_id,
+                session_id,
+                f"Complete {suffix} within available capacity.",
+                "Available capacity cannot satisfy the current objective.",
+                [{"code": "CAPACITY_EXCEEDED"}],
+            )
+            text = "Objective decision requested."
+        else:
+            await self.service.publish_plan(
+                user_id,
+                session_id,
+                session_id,
+                "Capacity-Aware Operations",
+                "The accepted objective has a validated plan.",
+                {"assignments": [{"task": "JOB-001", "resource": "VEH-001"}]},
+            )
+            text = "Plan published."
+        yield Event(
+            author="mission_manager",
+            content=types.Content(
+                role="model", parts=[types.Part.from_text(text=text)]
+            ),
+        )
+
+
+def build_services(root: Path, runner=None):
     data_service = DataSourceService(
         repository=InMemorySourceRepository(),
         storage=LocalSourceStorage(root / "stored"),
     )
-    runner = ClarifyThenPublishRunner()
+    runner = runner or ClarifyThenPublishRunner()
     session_service = InMemorySessionService()
     mission_service = MissionService(
         store=InMemoryMissionStore(),
@@ -321,6 +364,79 @@ class MissionServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("query_source", serialized)
         self.assertNotIn("hidden reasoning", serialized)
 
+    async def test_accept_revised_objective_replans_once_and_preserves_history(self) -> None:
+        runner = ObjectiveDecisionRunner(feasible_after_acceptance=True)
+        data_service, service, _sessions = build_services(self.root / "objective", runner)
+        workspace = await service.create_workspace(WorkspaceCreate(name="Objective Test"))
+        data_service.connect_sqlite(
+            workspace.workspace_id,
+            "Operations",
+            self.database_path,
+            "operations.db",
+        )
+        mission = await service.create_mission(
+            workspace.workspace_id,
+            MissionCreate(objective="Complete every task with current capacity."),
+        )
+
+        waiting = await service.run_mission(workspace.workspace_id, mission.mission_id)
+        self.assertEqual(waiting.status, "awaiting_objective_decision")
+        self.assertEqual(waiting.objective_decision.status, "pending")
+
+        completed = await service.accept_objective_decision(
+            workspace.workspace_id, mission.mission_id
+        )
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(runner.calls, 2)
+        self.assertEqual(len(completed.objective_history), 1)
+        self.assertEqual(
+            completed.objective_history[0].objective,
+            "Complete every task with current capacity.",
+        )
+        self.assertEqual(
+            completed.objective,
+            "Complete highest-priority work within available capacity.",
+        )
+
+    async def test_second_infeasible_attempt_stops_and_discard_deletes_mission(self) -> None:
+        runner = ObjectiveDecisionRunner(feasible_after_acceptance=False)
+        data_service, service, sessions = build_services(self.root / "discard", runner)
+        workspace = await service.create_workspace(WorkspaceCreate(name="Discard Test"))
+        data_service.connect_sqlite(
+            workspace.workspace_id,
+            "Operations",
+            self.database_path,
+            "operations.db",
+        )
+        mission = await service.create_mission(
+            workspace.workspace_id,
+            MissionCreate(objective="Complete every task with current capacity."),
+        )
+        await service.run_mission(workspace.workspace_id, mission.mission_id)
+
+        waiting_again = await service.accept_objective_decision(
+            workspace.workspace_id, mission.mission_id
+        )
+        self.assertEqual(waiting_again.status, "awaiting_objective_decision")
+        self.assertEqual(runner.calls, 2)
+        self.assertEqual(
+            waiting_again.objective_decision.proposed_objective,
+            "Complete one priority task within available capacity.",
+        )
+
+        await service.discard_objective_decision(
+            workspace.workspace_id, mission.mission_id
+        )
+        with self.assertRaises(MissionError) as raised:
+            await service.require_mission(workspace.workspace_id, mission.mission_id)
+        self.assertEqual(raised.exception.code, "MISSION_NOT_FOUND")
+        session = await sessions.get_session(
+            app_name=APP_NAME,
+            user_id=workspace.workspace_id,
+            session_id=mission.mission_id,
+        )
+        self.assertIsNone(session)
+
 
 class MissionApiTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -387,6 +503,72 @@ class MissionApiTest(unittest.TestCase):
         self.assertIn("mission_created", event_types)
         self.assertIn("clarification_requested", event_types)
         self.assertIn("plan_published", event_types)
+
+    def test_objective_accept_and_discard_endpoints(self) -> None:
+        runner = ObjectiveDecisionRunner(feasible_after_acceptance=True)
+        self.data_service, self.mission_service, _ = build_services(
+            self.root / "objective-api", runner
+        )
+        app.dependency_overrides[data_source_service_dependency] = lambda: self.data_service
+        app.dependency_overrides[mission_service_dependency] = lambda: self.mission_service
+
+        workspace = self.client.post(
+            "/api/workspaces", json={"name": "Objective API"}
+        ).json()
+        workspace_id = workspace["workspace_id"]
+        upload = self.client.post(
+            f"/api/workspaces/{workspace_id}/data-sources/sqlite",
+            data={"name": "Operations"},
+            files={"file": ("operations.db", self.database_path.read_bytes(), "application/vnd.sqlite3")},
+        )
+        self.assertEqual(upload.status_code, 201, upload.text)
+        created = self.client.post(
+            f"/api/workspaces/{workspace_id}/missions",
+            json={"objective": "Complete every task."},
+        ).json()
+        mission_id = created["mission_id"]
+        waiting = self.client.post(
+            f"/api/workspaces/{workspace_id}/missions/{mission_id}/run"
+        )
+        self.assertEqual(waiting.json()["status"], "awaiting_objective_decision")
+        accepted = self.client.post(
+            f"/api/workspaces/{workspace_id}/missions/{mission_id}/objective-decision/accept"
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        self.assertEqual(accepted.json()["status"], "completed")
+
+        discard_runner = ObjectiveDecisionRunner(feasible_after_acceptance=False)
+        discard_data, discard_service, _ = build_services(
+            self.root / "discard-api", discard_runner
+        )
+        app.dependency_overrides[data_source_service_dependency] = lambda: discard_data
+        app.dependency_overrides[mission_service_dependency] = lambda: discard_service
+        discard_workspace = self.client.post(
+            "/api/workspaces", json={"name": "Discard API"}
+        ).json()
+        discard_workspace_id = discard_workspace["workspace_id"]
+        discard_data.connect_sqlite(
+            discard_workspace_id,
+            "Operations",
+            self.database_path,
+            "operations.db",
+        )
+        discard_mission = self.client.post(
+            f"/api/workspaces/{discard_workspace_id}/missions",
+            json={"objective": "Complete every task."},
+        ).json()
+        discard_mission_id = discard_mission["mission_id"]
+        self.client.post(
+            f"/api/workspaces/{discard_workspace_id}/missions/{discard_mission_id}/run"
+        )
+        discarded = self.client.delete(
+            f"/api/workspaces/{discard_workspace_id}/missions/{discard_mission_id}/objective-decision"
+        )
+        self.assertEqual(discarded.status_code, 204, discarded.text)
+        missing = self.client.get(
+            f"/api/workspaces/{discard_workspace_id}/missions/{discard_mission_id}"
+        )
+        self.assertEqual(missing.status_code, 404)
 
 
 class MissionBuilderTest(unittest.TestCase):

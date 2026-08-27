@@ -13,6 +13,15 @@ from pydantic import BaseModel, Field
 from .data_sources.organizational_data_tools import inspect_source_schema
 from .data_sources.organizational_data_tools import list_authorized_sources
 from .data_sources.organizational_data_tools import query_source
+from .geospatial_tools import GeospatialJourney
+from .geospatial_tools import LocationReference
+from .geospatial_tools import PlanningWindow
+from .geospatial_tools import compute_route_matrix
+from .geospatial_tools import compute_routes
+from .geospatial_tools import geocode_locations
+from .geospatial_tools import get_weather_context
+from .geospatial_tools import inspect_roads
+from .geospatial_tools import search_places
 from .mission_manager_tools import load_mission_state
 from .mission_manager_tools import publish_plan
 from .mission_manager_tools import request_clarification
@@ -49,18 +58,34 @@ class GeospatialRequest(BaseModel):
     """[Geospatial Intelligence Agent input_schema] JSON sent by the manager."""
 
     objective: str
-    locations: list[dict[str, Any]] = Field(default_factory=list)
+    locations: list[LocationReference] = Field(default_factory=list)
+    journeys: list[GeospatialJourney] = Field(default_factory=list)
+    planning_window: PlanningWindow | None = None
     questions: list[str] = Field(default_factory=list)
     constraints: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class GeospatialIssue(BaseModel):
+    """A warning or unresolved geospatial fact returned to the manager."""
+
+    code: str
+    message: str
+    input_ref: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class GeospatialFindings(BaseModel):
     """[Geospatial Intelligence Agent output_schema] Structured JSON returned."""
 
     resolved_locations: list[dict[str, Any]] = Field(default_factory=list)
+    places: list[dict[str, Any]] = Field(default_factory=list)
     routes: list[dict[str, Any]] = Field(default_factory=list)
-    travel_matrix: dict[str, Any] | None = None
-    unresolved: list[str] = Field(default_factory=list)
+    travel_matrices: list[dict[str, Any]] = Field(default_factory=list)
+    weather_context: list[dict[str, Any]] = Field(default_factory=list)
+    road_context: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[GeospatialIssue] = Field(default_factory=list)
+    unresolved: list[GeospatialIssue] = Field(default_factory=list)
+    provenance: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PlanningRequest(BaseModel):
@@ -90,70 +115,6 @@ class MissionManagerResult(BaseModel):
     summary: str
     question: str | None = None
     plan: dict[str, Any] | None = None
-
-
-# Geospatial Intelligence Agent tools
-# These will call Google Geocoding, Places, and Routes.
-
-
-def geocode_locations(
-    locations: list[dict[str, Any]],
-    tool_context: ToolContext,
-) -> dict[str, Any]:
-    """Resolve organizational location records to verified coordinates.
-
-    Args:
-        locations: Location identifiers, addresses, or place descriptions.
-    """
-    raise NotImplementedError("Google Geocoding integration is not implemented yet.")
-
-
-def search_places(
-    query: str,
-    location_context: dict[str, Any] | None,
-    tool_context: ToolContext,
-) -> dict[str, Any]:
-    """Find or verify a physical place using Google Places.
-
-    Args:
-        query: Place name or natural-language place query.
-        location_context: Optional geographic bias or restriction.
-    """
-    raise NotImplementedError("Google Places integration is not implemented yet.")
-
-
-def compute_routes(
-    origin: dict[str, Any],
-    destination: dict[str, Any],
-    waypoints: list[dict[str, Any]],
-    constraints: dict[str, Any],
-    tool_context: ToolContext,
-) -> dict[str, Any]:
-    """Compute route geometry, distance, duration, and journey facts.
-
-    Args:
-        origin: Resolved route origin.
-        destination: Resolved route destination.
-        waypoints: Ordered intermediate locations, if any.
-        constraints: Travel mode and operational route constraints.
-    """
-    raise NotImplementedError("Google Routes integration is not implemented yet.")
-
-
-def compute_route_matrix(
-    origins: list[dict[str, Any]],
-    destinations: list[dict[str, Any]],
-    constraints: dict[str, Any],
-    tool_context: ToolContext,
-) -> dict[str, Any]:
-    """Compute travel times and distances between sets of locations.
-
-    Args:
-        origins: Resolved origin locations.
-        destinations: Resolved destination locations.
-        constraints: Travel mode and operational route constraints.
-    """
-    raise NotImplementedError("Google route-matrix integration is not implemented yet.")
 
 
 # Operational Planning and Validation Agent tools
@@ -247,12 +208,22 @@ geospatial_intelligence_agent = Agent(
         "physical-world context for the current Mission."
     ),
     instruction="""
-You are the Geospatial Intelligence Agent for one isolated Mission. Resolve only
-the locations and journey facts required by the delegated objective. Use Google
-geospatial tools rather than guessing coordinates, routes, distances, or travel
-times. Preserve the provenance of organizational records, Google results, and
-simulation data. Never ask the user questions. Return structured findings and
-explicitly list unresolved locations or missing inputs for the Mission Manager.
+You are the Geospatial Intelligence Agent for one isolated Mission. Call only
+the tools relevant to the delegated objective; do not call every tool by
+default. Use geocoding for unresolved organizational locations, Places API
+(New) for place discovery or verification, Routes for selected journeys, and a
+route matrix for candidate travel costs. Fetch Weather API context for
+time-bound physical operations even when it is informational, but treat weather
+as a planning constraint only when organizational rules or the objective make
+it operationally relevant. Use Roads API only for GPS correction, nearest-road,
+road-access, or speed-limit questions; ordinary route distance does not require
+Roads API.
+
+Never guess coordinates, places, routes, distances, travel times, weather, or
+road facts. Preserve organizational reference IDs and the provenance returned
+by every tool. Partial tool failures must become structured warnings or
+unresolved items, not invented replacements. Never ask the user questions or
+publish a plan. Return valid structured JSON matching your output schema.
 """.strip(),
     input_schema=GeospatialRequest,
     output_schema=GeospatialFindings,
@@ -261,6 +232,8 @@ explicitly list unresolved locations or missing inputs for the Mission Manager.
         search_places,
         compute_routes,
         compute_route_matrix,
+        get_weather_context,
+        inspect_roads,
     ],
 )
 

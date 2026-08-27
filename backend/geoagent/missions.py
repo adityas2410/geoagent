@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Literal, Protocol
 from uuid import uuid4
@@ -21,6 +22,70 @@ from .data_sources.source_manager import get_data_source_service
 
 
 APP_NAME = "geoagent"
+SPECIALIST_AGENT_NAMES = frozenset(
+    {
+        "organizational_data_agent",
+        "geospatial_intelligence_agent",
+        "planning_validation_agent",
+    }
+)
+
+
+@dataclass
+class _SpecialistDelegation:
+    """One manager-to-specialist call being projected into Mission events."""
+
+    specialist: str
+    delegation_id: str
+    started: bool = False
+    completed: bool = False
+
+
+@dataclass
+class _AgentActivityProjection:
+    """Run-local state used to emit each specialist lifecycle event once."""
+
+    delegations: list[_SpecialistDelegation] = field(default_factory=list)
+    processed_event_ids: set[str] = field(default_factory=set)
+
+    def begin_event(self, event_id: str) -> bool:
+        if event_id in self.processed_event_ids:
+            return False
+        self.processed_event_ids.add(event_id)
+        return True
+
+    def add(self, specialist: str, delegation_id: str) -> _SpecialistDelegation:
+        for delegation in self.delegations:
+            if delegation.delegation_id == delegation_id:
+                return delegation
+        delegation = _SpecialistDelegation(specialist, delegation_id)
+        self.delegations.append(delegation)
+        return delegation
+
+    def active(self, specialist: str) -> _SpecialistDelegation | None:
+        for delegation in self.delegations:
+            if (
+                delegation.specialist == specialist
+                and delegation.started
+                and not delegation.completed
+            ):
+                return delegation
+        for delegation in self.delegations:
+            if delegation.specialist == specialist and not delegation.completed:
+                return delegation
+        return None
+
+    def matching_response(
+        self, specialist: str, delegation_id: str | None
+    ) -> _SpecialistDelegation | None:
+        if delegation_id:
+            for delegation in self.delegations:
+                if (
+                    delegation.specialist == specialist
+                    and delegation.delegation_id == delegation_id
+                ):
+                    return delegation
+        return self.active(specialist)
 MissionStatus = Literal[
     "created",
     "running",
@@ -864,6 +929,7 @@ class MissionService:
 
     async def _run_agent(self, mission: MissionRecord, message: str) -> MissionRecord:
         """Run the manager until it completes, pauses, or fails."""
+        activity = _AgentActivityProjection()
         try:
             content = types.Content(
                 role="user", parts=[types.Part.from_text(text=message)]
@@ -873,7 +939,7 @@ class MissionService:
                 session_id=mission.adk_session_id,
                 new_message=content,
             ):
-                await self._record_adk_event(mission, adk_event)
+                await self._record_adk_event(mission, adk_event, activity)
         except Exception as error:
             logger.exception("Mission Manager run failed for %s", mission.mission_id)
             return await self._fail_running_mission(
@@ -909,40 +975,131 @@ class MissionService:
         except MissionError:
             return await self.require_mission(mission.workspace_id, mission.mission_id)
 
-    async def _record_adk_event(self, mission: MissionRecord, event: Event) -> None:
+    async def _record_adk_event(
+        self,
+        mission: MissionRecord,
+        event: Event,
+        activity: _AgentActivityProjection | None = None,
+    ) -> None:
         """Copy safe ADK actions and results without copying hidden thoughts."""
+        activity = activity or _AgentActivityProjection()
+        if not activity.begin_event(event.id):
+            return
         timestamp = datetime.fromtimestamp(event.timestamp, tz=timezone.utc)
         index = 0
-        for call in event.get_function_calls():
+
+        async def append_projected_event(
+            event_type: str,
+            *,
+            agent: str | None = None,
+            tool: str | None = None,
+            payload: dict[str, Any] | None = None,
+        ) -> None:
+            nonlocal index
             await self.store.append_event(
                 mission.workspace_id,
                 _event(
                     mission.mission_id,
+                    event_type,
+                    agent=agent,
+                    tool=tool,
+                    payload=payload,
+                    source_event_id=event.id,
+                    created_at=timestamp,
+                    event_id=f"evt_adk_{event.id}_{index}",
+                ),
+            )
+            index += 1
+
+        specialist_author = event.author if event.author in SPECIALIST_AGENT_NAMES else None
+        if not specialist_author and event.node_info.name in SPECIALIST_AGENT_NAMES:
+            specialist_author = event.node_info.name
+        if specialist_author:
+            delegation = activity.active(specialist_author)
+            if delegation and not delegation.started:
+                delegation.started = True
+                await append_projected_event(
+                    "specialist_started",
+                    agent=specialist_author,
+                    payload={
+                        "specialist": specialist_author,
+                        "delegation_id": delegation.delegation_id,
+                    },
+                )
+
+        for call in event.get_function_calls():
+            if call.name in SPECIALIST_AGENT_NAMES:
+                delegation_id = call.id or f"{event.id}:{index}"
+                activity.add(call.name, delegation_id)
+                await append_projected_event(
+                    "task_delegated",
+                    agent=event.author or "mission_manager",
+                    tool=call.name,
+                    payload={
+                        "specialist": call.name,
+                        "delegation_id": delegation_id,
+                        "request": _safe_value(call.args or {}),
+                    },
+                )
+            else:
+                await append_projected_event(
                     "tool_called",
                     agent=event.author or None,
                     tool=call.name,
                     payload={"arguments": _safe_value(call.args or {})},
-                    source_event_id=event.id,
-                    created_at=timestamp,
-                    event_id=f"evt_adk_{event.id}_{index}",
-                ),
-            )
-            index += 1
+                )
+
         for response in event.get_function_responses():
-            await self.store.append_event(
-                mission.workspace_id,
-                _event(
-                    mission.mission_id,
+            result = _safe_value(
+                response.response if response.response is not None else {}
+            )
+            if response.name in SPECIALIST_AGENT_NAMES:
+                delegation = activity.matching_response(response.name, response.id)
+                if delegation:
+                    if not delegation.started:
+                        delegation.started = True
+                        await append_projected_event(
+                            "specialist_started",
+                            agent=response.name,
+                            payload={
+                                "specialist": response.name,
+                                "delegation_id": delegation.delegation_id,
+                            },
+                        )
+                    is_error = (
+                        isinstance(result, str)
+                        and result.startswith(
+                            ("Error running sub-agent:", "Error validating input:")
+                        )
+                    ) or (
+                        isinstance(result, dict) and result.get("status") == "error"
+                    )
+                    delegation.completed = True
+                    await append_projected_event(
+                        "specialist_completed",
+                        agent=response.name,
+                        payload={
+                            "specialist": response.name,
+                            "delegation_id": delegation.delegation_id,
+                            "status": "error" if is_error else "success",
+                            "result": result,
+                        },
+                    )
+                else:
+                    await append_projected_event(
+                        "tool_result",
+                        agent=event.author or None,
+                        tool=response.name,
+                        payload={"result": result},
+                    )
+            else:
+                await append_projected_event(
                     "tool_result",
                     agent=event.author or None,
                     tool=response.name,
-                    payload={"result": _safe_value(response.response or {})},
-                    source_event_id=event.id,
-                    created_at=timestamp,
-                    event_id=f"evt_adk_{event.id}_{index}",
-                ),
-            )
-            index += 1
+                    payload={"result": result},
+                )
+
         visible_text: list[str] = []
         if event.content and event.content.parts:
             visible_text = [
@@ -951,31 +1108,16 @@ class MissionService:
                 if part.text and not getattr(part, "thought", False)
             ]
         if visible_text:
-            await self.store.append_event(
-                mission.workspace_id,
-                _event(
-                    mission.mission_id,
-                    "agent_message",
-                    agent=event.author or None,
-                    payload={"text": "".join(visible_text)},
-                    source_event_id=event.id,
-                    created_at=timestamp,
-                    event_id=f"evt_adk_{event.id}_{index}",
-                ),
+            await append_projected_event(
+                "agent_message",
+                agent=event.author or None,
+                payload={"text": "".join(visible_text)},
             )
-            index += 1
         if event.actions.state_delta:
-            await self.store.append_event(
-                mission.workspace_id,
-                _event(
-                    mission.mission_id,
-                    "state_changed",
-                    agent=event.author or None,
-                    payload={"changes": _safe_value(event.actions.state_delta)},
-                    source_event_id=event.id,
-                    created_at=timestamp,
-                    event_id=f"evt_adk_{event.id}_{index}",
-                ),
+            await append_projected_event(
+                "state_changed",
+                agent=event.author or None,
+                payload={"changes": _safe_value(event.actions.state_delta)},
             )
 
 

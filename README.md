@@ -56,7 +56,7 @@ Create or open a Workspace
   -> create the Mission and its persistent ADK session
   -> start the Mission's planning run
   -> Mission Manager coordinates the specialist agents
-  -> receive a clarification question or a completed validated plan
+  -> receive a clarification question, an objective decision, or a completed plan
 ```
 
 If the user does not select sources, the new Mission is authorized to use all currently connected sources in that Workspace. The backend saves those authorized source IDs with the Mission so later source connections do not silently change an existing Mission.
@@ -73,7 +73,42 @@ POST /api/workspaces/{workspace_id}/missions/{mission_id}/run
 
 During backend testing, these production endpoints are called directly. The frontend later calls both operations when the user presses **Start Mission**.
 
-If clarification is required, the Mission enters `awaiting_input`. The user's answer resumes the same Mission and ADK session. A completed Mission stores its validated plan and events in Firestore.
+### Clarification and impossible-Mission decisions
+
+The Mission Manager starts by loading the Mission. If the objective is genuinely
+too vague to act on, it asks **one concise open-ended question** before it
+delegates work. It does not ask questions while a specialist is working. A short
+objective such as `Plan tomorrow's deliveries.` is actionable and proceeds
+without a question.
+
+When clarification is needed, the Mission enters `awaiting_input`. The answer
+resumes the same Mission and ADK session; the Manager combines it with the
+original objective and continues without asking a second initial question.
+
+If the specialists and deterministic validation show that the objective is not
+possible, this is not treated as a clarification. The Manager saves the reasons
+and one achievable replacement objective, then the Mission enters
+`awaiting_objective_decision`.
+
+```text
+User chooses Accept and Replan
+  -> original objective is kept in Mission history
+  -> proposed objective becomes the current objective
+  -> one new planning attempt runs
+  -> if still impossible, stop and ask for another explicit decision
+
+User chooses Discard Mission
+  -> Mission, its product events, and its ADK session are deleted
+```
+
+The two API actions are:
+
+```text
+POST   /api/workspaces/{workspace_id}/missions/{mission_id}/objective-decision/accept
+DELETE /api/workspaces/{workspace_id}/missions/{mission_id}/objective-decision
+```
+
+A completed Mission stores its plan and frontend-safe events in Firestore.
 
 ## Firestore structure
 
@@ -98,58 +133,59 @@ adk-session                                     ADK-managed collection
                     └── events                  ADK execution-history collection
 ```
 
-The Mission document is GeoAgent's authoritative product record. It stores the objective, authorized source IDs, status, clarification, generated name, summary, and final structured plan. Its `events` collection contains the safe agent actions, tool calls, structured results, and state changes intended for the frontend.
+The Mission document is GeoAgent's authoritative product record. It stores the
+objective, objective history, authorized source IDs, status, clarification,
+pending objective decision, generated name, summary, and final structured plan.
+Its `events` collection contains safe agent actions, tool calls, structured
+results, and state changes intended for the frontend.
 
 ADK's `adk-session` collection is the manager's persistent working context. GeoAgent reuses the Mission ID as the ADK session ID and uses the Workspace ID as ADK's internal `user_id`; this is session isolation only and does not represent a user account. Some identifiers and initial context appear in both places because the product API and ADK runtime have different storage responsibilities.
 
 Source documents contain connection metadata only. The SQLite database itself stays in `backend/data/sources` during local development and moves to Cloud Storage when the deployed backend uses the GCS storage setting.
 
-## Organizational data architecture
+## Backend architecture and Mission flow
 
-GeoAgent keeps operational data separate from its own application state:
+The backend separates organizational data from GeoAgent's own state:
 
-- **SQLite** contains the organization's operational records, such as jobs, resources, locations, availability, and rules.
-- **Cloud Storage** holds uploaded SQLite files in production because Cloud Run's local filesystem is temporary. Local development uses `backend/data/sources` instead.
-- **Firestore** contains only GeoAgent metadata and state: connected-source records, Mission state, events, clarification state, and generated plans. It does not duplicate operational rows from SQLite.
+- **SQLite** holds an organization's operational records.
+- **Firestore** holds Workspaces, source metadata, Missions, plans, decisions, and frontend-safe events.
+- **Cloud Storage** holds uploaded SQLite files in production; local development uses `backend/data/sources`.
+- **ADK session storage** holds the isolated working context for each Mission.
 
-Connecting a SQLite source follows this path:
+The files are organised by responsibility, not by a strict one-file-per-step
+rule. Several files naturally participate in the same request.
 
-```text
-UI upload
-  -> app.py receives the file
-  -> source_manager.py coordinates the connection
-  -> sqlite_source.py validates and inspects SQLite
-  -> source_files.py stores the database file
-  -> source_records.py registers its metadata in Firestore
-```
-
-When the Organizational Data Agent reads a source:
-
-```text
-agent.py
-  -> organizational_data_tools.py checks the Mission's permitted source IDs
-  -> source_manager.py coordinates access
-  -> source_records.py loads connection metadata
-  -> source_files.py retrieves the SQLite file
-  -> sqlite_source.py executes a constrained read-only query
-```
-
-The database-related Python files have distinct responsibilities:
-
-| File | Responsibility |
+| File or folder | Purpose |
 |---|---|
-| `backend/geoagent/app.py` | HTTP endpoints for Workspaces, connected sources, Missions, planning runs, clarification responses, and Mission events. |
-| `backend/geoagent/data_sources/organizational_data_tools.py` | The Organizational Data Agent's three tools: list sources, inspect schema, and query a source. |
-| `backend/geoagent/data_sources/source_manager.py` | Coordinates validation, storage, registration, Mission source checks, and queries. |
-| `backend/geoagent/data_sources/sqlite_source.py` | Validates SQLite, discovers its schema, and compiles safe read-only queries. |
-| `backend/geoagent/data_sources/source_files.py` | Stores and retrieves SQLite files locally or through Cloud Storage. |
-| `backend/geoagent/data_sources/source_records.py` | Stores and retrieves connection metadata through Firestore. |
-| `backend/geoagent/data_sources/data_source_contracts.py` | Defines validated connection, schema, query, result, and error structures. |
-| `backend/geoagent/data_sources/__init__.py` | Marks the directory as a Python package and exports common types; it contains no operational logic. |
+| `backend/geoagent/app.py` | FastAPI entry point. Receives Workspace, source, Mission, clarification, objective-decision, and event requests. |
+| `backend/geoagent/missions.py` | Core Mission lifecycle: Firestore records/events, ADK sessions/runs, state transitions, clarification resume, objective decisions, and plan persistence. |
+| `backend/geoagent/agent.py` | Defines the Manager and three specialist agents, their instructions, schemas, and automatic ADK subagent delegation. |
+| `backend/geoagent/mission_manager_tools.py` | The four Manager-only actions: load Mission state, ask the one clarification, request an objective decision, and publish a plan. |
+| `backend/geoagent/geospatial_tools.py` | Geospatial Agent integrations for Google Maps, Weather, and Roads APIs; normalizes results, provenance, partial failures, and API errors. |
+| `backend/geoagent/planning_tools.py` | Planning Agent's domain-neutral optimization, metrics, and validation. Uses local OR-Tools and optionally Route Optimization. |
+| `backend/geoagent/data_sources/organizational_data_tools.py` | Organizational Data Agent's authorised source listing, schema inspection, and read-only querying tools. |
+| `backend/geoagent/data_sources/source_manager.py` | Coordinates source validation, storage, registration, Mission authorization, and queries. |
+| `backend/geoagent/data_sources/sqlite_source.py` | SQLite validation, schema discovery, and constrained read-only query execution. |
+| `backend/geoagent/data_sources/source_files.py` | Local or Cloud Storage file handling for uploaded SQLite databases. |
+| `backend/geoagent/data_sources/source_records.py` | Firestore persistence for source connection metadata. |
+| `backend/geoagent/data_sources/data_source_contracts.py` | Shared validated source, schema, query, result, and error structures. |
+| `backend/geoagent/__init__.py` and `backend/geoagent/data_sources/__init__.py` | Python package boundaries and shared exports; no business workflow runs here. |
+| `backend/demo_data/build_demo_db.py` | Builds the synthetic Kerala demonstration database; it is not used by the runtime except when creating demo data. |
+| `backend/requirements.txt` | Backend Python dependencies. |
+| `backend/tests/` | Test files mirror the backend responsibilities: API, Missions, Manager tools, organizational-data tools, geospatial tools, planning tools, source persistence, SQLite adapter, and demo data. |
 
-`agent.py` imports the three functions from `organizational_data_tools.py` and assigns them to the Organizational Data Agent. It does not contain duplicate implementations.
+### Source connection flow
 
-## Agent architecture
+```text
+source upload
+  -> app.py
+  -> source_manager.py
+  -> sqlite_source.py validates the database
+  -> source_files.py stores the file
+  -> source_records.py saves source metadata in Firestore
+```
+
+### Multi-agent Mission flow
 
 Each Mission runs one isolated Google ADK collaborative agent team:
 
@@ -160,15 +196,42 @@ Mission Manager
 └── Operational Planning and Validation Agent
 ```
 
-The **Mission Manager** is the user-facing coordinator. It delegates work, resolves specialist findings, requests clarification when essential information cannot be discovered, and publishes the final validated plan. Its application tools are `load_mission_state`, `request_clarification`, and `publish_plan`; ADK also generates one delegation tool for each declared subagent.
+```text
+start Mission
+  -> app.py calls missions.py
+  -> missions.py loads the Mission and starts its saved ADK session
+  -> Manager calls load_mission_state
+  -> if the objective is genuinely unclear: save one clarification and pause
+  -> otherwise ADK automatically delegates to the relevant specialists
+       -> Organizational Data Agent reads only authorised source data
+       -> Geospatial Agent gets only the needed physical-world context
+       -> Planning Agent optimizes, calculates metrics, and validates
+  -> Manager receives the structured findings
+  -> feasible: Manager publishes the plan to Firestore
+  -> impossible: Manager saves one replacement objective and waits for the user
+  -> missions.py records safe events throughout; hidden model reasoning is excluded
+```
+
+The **Mission Manager** is the user-facing coordinator. It loads Mission state,
+decides whether one initial clarification is essential, delegates work, resolves
+specialist findings, and publishes a feasible validated plan. If the objective
+is impossible, it requests an explicit objective decision instead of retrying
+or publishing an invalid plan. Its application tools are `load_mission_state`,
+`request_clarification`, `request_objective_decision`, and `publish_plan`; ADK
+automatically generates one delegation tool for each declared subagent.
 
 The three specialists are leaf agents using `mode="single_turn"`. They do not interact with the user:
 
 - **Organizational Data Agent:** uses `list_authorized_sources`, `inspect_source_schema`, and read-only `query_source` to discover relevant organizational facts without hard-coded domain schemas.
-- **Geospatial Intelligence Agent:** uses `geocode_locations`, `search_places`, `compute_routes`, and `compute_route_matrix` to obtain physical-world facts from Google Maps capabilities.
-- **Operational Planning and Validation Agent:** uses deterministic `optimize_assignments`, `calculate_plan_metrics`, and `validate_plan` functions to build and check candidate plans. It cannot publish a plan.
+- **Geospatial Intelligence Agent:** selects only the relevant tools: `geocode_locations`, `search_places`, `compute_routes`, `compute_route_matrix`, `get_weather_context`, and `inspect_roads`. It preserves organizational record IDs, provenance, and per-item failures rather than inventing physical-world facts. Weather is collected for time-bound physical work even when it is informational; Roads is used only for GPS correction, nearest-road, access, or speed-limit needs.
+- **Operational Planning and Validation Agent:** uses `optimize_assignments`, `calculate_plan_metrics`, and `validate_plan` to build and check domain-neutral candidate plans. It considers availability, capacities, capabilities, time windows, travel costs, utilization, warnings, and hard violations. `optimize_assignments` uses local OR-Tools by default and may use Google Route Optimization for a compatible vehicle-routing problem; that option uses Application Default Credentials, not the Maps API key. It cannot publish a plan or talk to the user.
 
-For human input, only the Mission Manager may call `request_clarification`. That action stores an open-ended question, places the Mission in `awaiting_input`, and stops work until the user responds through the same Mission session. The Mission runner converts real ADK activity into safe agent, tool, result, and state events for the UI without exposing hidden reasoning; event recording is infrastructure, not an agent-controlled tool.
+For human input, only the Mission Manager may call `request_clarification`.
+That action stores the one initial open-ended question, places the Mission in
+`awaiting_input`, and stops work until the user responds through the same
+Mission session. The Mission runner converts ADK activity into safe agent,
+tool, result, and state events without exposing hidden reasoning; event
+recording is infrastructure, not an agent-controlled tool.
 
 ## Features
 
@@ -176,10 +239,10 @@ For human input, only the Mission Manager may call `request_clarification`. That
 - **Multi-agent planning:** A Mission Manager coordinates capability-based agents for organizational-data investigation, geospatial intelligence, and operational planning/validation.
 - **Simple business objectives:** Users describe the desired outcome without needing to understand database schemas, route optimization, or prompt engineering.
 - **Flexible organizational data:** Missions work with authorized connected data sources rather than hard-coded domain tables or workflows.
-- **Geospatial intelligence:** Google Maps capabilities provide location resolution, routes, journey facts, and operational geographic context.
-- **Validated operational plans:** Agents combine their findings into a structured plan that can be persisted, inspected, and visualized.
-- **Live operational map:** The map represents real operational state as locations, routes, resources, constraints, assignments, disruptions, and plan changes emerge.
-- **Agent observability:** A synchronized activity view shows real agent actions, tool usage, results, validation, and replanning events without exposing private reasoning.
-- **Autonomous reassessment:** Missions can revisit changing conditions and replan affected work when a material change occurs.
+- **Geospatial intelligence:** Google Maps APIs provide geocoding, Places search, routes, travel matrices, selected weather context, and selected road context with provenance.
+- **Validated operational plans:** Deterministic tools optimize assignments, calculate metrics, and report hard violations and warnings before the Manager publishes a plan.
+- **Mission decisions:** When an objective is impossible, the user explicitly accepts one revised objective for a single new attempt or discards the Mission.
+- **Agent observability:** The backend persists safe lifecycle, tool, result, and state events without private reasoning. The dedicated frontend activity panel and clearer specialist-delegation event labels are still being completed.
+- **Planned operational map and reassessment:** A frontend map, disruption-driven reassessment, and targeted replanning are planned next; they are not yet available in the current backend.
 - **Parallel Mission isolation:** Multiple active Missions can operate independently while sharing only explicitly authorized organizational data.
 - **Cross-Mission operations Q&A:** A later Master Operations Agent can retrieve and explain persisted state across Missions without merging their private execution contexts.

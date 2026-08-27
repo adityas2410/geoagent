@@ -207,6 +207,111 @@ class ObjectiveDecisionRunner:
         )
 
 
+class ActivityProjectionRunner:
+    """Produces the ADK event shapes used by single-turn specialist tools."""
+
+    specialist_sequence = [
+        ("organizational_data_agent", "query_source"),
+        ("geospatial_intelligence_agent", "compute_routes"),
+        ("planning_validation_agent", "validate_plan"),
+        ("organizational_data_agent", "inspect_source_schema"),
+    ]
+
+    def __init__(self) -> None:
+        self.service: MissionService | None = None
+
+    async def run_async(self, *, user_id, session_id, new_message):
+        assert self.service is not None
+        for index, (specialist, tool_name) in enumerate(self.specialist_sequence):
+            delegation_id = f"delegation-{index}"
+            delegated = Event(
+                author="mission_manager",
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part(
+                            function_call=types.FunctionCall(
+                                id=delegation_id,
+                                name=specialist,
+                                args={"objective": "Plan tomorrow's deliveries."},
+                            )
+                        )
+                    ],
+                ),
+            )
+            yield delegated
+            if index == 0:
+                yield delegated
+
+            specialist_call = Event(
+                author=specialist,
+                content=types.Content(
+                    role="model",
+                    parts=[
+                        types.Part(text="hidden specialist reasoning", thought=True),
+                        types.Part.from_function_call(
+                            name=tool_name, args={"request_id": index}
+                        ),
+                    ],
+                ),
+            )
+            yield specialist_call
+            if index == 0:
+                yield specialist_call
+            yield Event(
+                author=specialist,
+                content=types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_function_response(
+                            name=tool_name,
+                            response={"status": "success", "request_id": index},
+                        )
+                    ],
+                ),
+            )
+            yield Event(
+                author=specialist,
+                content=types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(text=f"{specialist} findings")],
+                ),
+            )
+            completed = Event(
+                author="mission_manager",
+                content=types.Content(
+                    role="user",
+                    parts=[
+                        types.Part(
+                            function_response=types.FunctionResponse(
+                                id=delegation_id,
+                                name=specialist,
+                                response={"status": "success", "specialist": specialist},
+                            )
+                        )
+                    ],
+                ),
+            )
+            yield completed
+            if index == 0:
+                yield completed
+
+        await self.service.publish_plan(
+            user_id,
+            session_id,
+            session_id,
+            "Tomorrow's Operations",
+            "A validated operational plan.",
+            {"assignments": [{"task": "JOB-001", "resource": "VEH-001"}]},
+        )
+        yield Event(
+            author="mission_manager",
+            content=types.Content(
+                role="model", parts=[types.Part.from_text(text="Plan published.")]
+            ),
+        )
+
+
 def build_services(root: Path, runner=None):
     data_service = DataSourceService(
         repository=InMemorySourceRepository(),
@@ -363,6 +468,80 @@ class MissionServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Visible finding", serialized)
         self.assertIn("query_source", serialized)
         self.assertNotIn("hidden reasoning", serialized)
+
+    async def test_specialist_activity_projection(self) -> None:
+        runner = ActivityProjectionRunner()
+        data_service, service, _sessions = build_services(self.root / "activity", runner)
+        workspace = await service.create_workspace(WorkspaceCreate(name="Activity Test"))
+        data_service.connect_sqlite(
+            workspace.workspace_id,
+            "Operations",
+            self.database_path,
+            "operations.db",
+        )
+        mission = await service.create_mission(
+            workspace.workspace_id,
+            MissionCreate(objective="Plan tomorrow's deliveries."),
+        )
+
+        completed = await service.run_mission(workspace.workspace_id, mission.mission_id)
+        self.assertEqual(completed.status, "completed")
+        events = await service.list_events(workspace.workspace_id, mission.mission_id)
+        activity_types = {
+            "task_delegated",
+            "specialist_started",
+            "tool_called",
+            "tool_result",
+            "specialist_completed",
+            "plan_published",
+        }
+        activity = [event for event in events if event.type in activity_types]
+        expected: list[str] = []
+        for _specialist, _tool in runner.specialist_sequence:
+            expected.extend(
+                [
+                    "task_delegated",
+                    "specialist_started",
+                    "tool_called",
+                    "tool_result",
+                    "specialist_completed",
+                ]
+            )
+        expected.append("plan_published")
+        self.assertEqual([event.type for event in activity], expected)
+
+        for index, (specialist, tool_name) in enumerate(runner.specialist_sequence):
+            delegated, started, called, result, finished = activity[
+                index * 5 : index * 5 + 5
+            ]
+            delegation_id = f"delegation-{index}"
+            self.assertEqual(delegated.agent, "mission_manager")
+            self.assertEqual(delegated.tool, specialist)
+            self.assertEqual(delegated.payload["specialist"], specialist)
+            self.assertEqual(delegated.payload["delegation_id"], delegation_id)
+            self.assertEqual(started.agent, specialist)
+            self.assertEqual(started.payload["delegation_id"], delegation_id)
+            self.assertEqual(called.agent, specialist)
+            self.assertEqual(called.tool, tool_name)
+            self.assertEqual(result.agent, specialist)
+            self.assertEqual(result.tool, tool_name)
+            self.assertEqual(finished.agent, specialist)
+            self.assertEqual(finished.payload["delegation_id"], delegation_id)
+            self.assertEqual(finished.payload["status"], "success")
+            for item in (delegated, started, called, result, finished):
+                self.assertIsNotNone(item.source_event_id)
+
+        delegated_specialists = [
+            event.payload["specialist"]
+            for event in activity
+            if event.type == "task_delegated"
+        ]
+        self.assertEqual(
+            delegated_specialists,
+            [specialist for specialist, _tool in runner.specialist_sequence],
+        )
+        serialized = " ".join(str(item.model_dump(mode="json")) for item in events)
+        self.assertNotIn("hidden specialist reasoning", serialized)
 
     async def test_accept_revised_objective_replans_once_and_preserves_history(self) -> None:
         runner = ObjectiveDecisionRunner(feasible_after_acceptance=True)

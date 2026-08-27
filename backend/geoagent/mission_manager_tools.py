@@ -94,6 +94,49 @@ async def request_clarification(
         )
 
 
+async def request_objective_decision(
+    proposed_objective: str,
+    reason: str,
+    hard_violations: list[dict[str, Any]],
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Pause an infeasible Mission with one achievable replacement objective.
+
+    Args:
+        proposed_objective: One achievable objective the user may accept.
+        reason: Concise explanation of why the current objective is infeasible.
+        hard_violations: Deterministic violations that prevent publication.
+    """
+    try:
+        workspace_id, mission_id, session_id = _identity(tool_context)
+        mission = await get_mission_service().request_objective_decision(
+            workspace_id,
+            mission_id,
+            session_id,
+            proposed_objective,
+            reason,
+            hard_violations,
+        )
+        tool_context.state["mission_status"] = "awaiting_objective_decision"
+        tool_context.state["proposed_objective"] = proposed_objective.strip()
+        tool_context.actions.skip_summarization = True
+        return {
+            "status": mission.status,
+            "mission_id": mission.mission_id,
+            "proposed_objective": proposed_objective.strip(),
+        }
+    except MissionError as error:
+        return _error(error)
+    except Exception:
+        return _error(
+            MissionError(
+                "MISSION_UNAVAILABLE",
+                "The objective decision could not be saved.",
+                503,
+            )
+        )
+
+
 async def publish_plan(
     mission_name: str,
     summary: str,
@@ -131,4 +174,9 @@ async def publish_plan(
         )
 
 
-__all__ = ["load_mission_state", "publish_plan", "request_clarification"]
+__all__ = [
+    "load_mission_state",
+    "publish_plan",
+    "request_clarification",
+    "request_objective_decision",
+]

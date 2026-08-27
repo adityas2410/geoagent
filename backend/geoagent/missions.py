@@ -21,7 +21,14 @@ from .data_sources.source_manager import get_data_source_service
 
 
 APP_NAME = "geoagent"
-MissionStatus = Literal["created", "running", "awaiting_input", "completed", "failed"]
+MissionStatus = Literal[
+    "created",
+    "running",
+    "awaiting_input",
+    "awaiting_objective_decision",
+    "completed",
+    "failed",
+]
 logger = logging.getLogger(__name__)
 
 
@@ -76,6 +83,25 @@ class ClarificationState(BaseModel):
     answered_at: datetime | None = None
 
 
+class ObjectiveHistoryEntry(BaseModel):
+    """One user-accepted replacement of an infeasible objective."""
+
+    objective: str
+    replaced_at: datetime
+    reason: str
+
+
+class ObjectiveDecisionState(BaseModel):
+    """The Manager's single proposed objective awaiting user choice."""
+
+    proposed_objective: str
+    reason: str
+    hard_violations: list[dict[str, Any]] = Field(default_factory=list)
+    status: Literal["pending", "accepted"] = "pending"
+    requested_at: datetime
+    accepted_at: datetime | None = None
+
+
 class MissionRecord(BaseModel):
     """Complete product-facing state saved for one Mission."""
 
@@ -88,6 +114,8 @@ class MissionRecord(BaseModel):
     name: str | None = None
     summary: str | None = None
     clarification: ClarificationState | None = None
+    objective_history: list[ObjectiveHistoryEntry] = Field(default_factory=list)
+    objective_decision: ObjectiveDecisionState | None = None
     plan: dict[str, Any] | None = None
     error: str | None = None
     created_at: datetime
@@ -156,6 +184,10 @@ class MissionStore(Protocol):
 
     async def list_missions(self, workspace_id: str) -> list[MissionRecord]:
         """Load all Missions from one Workspace."""
+        ...
+
+    async def delete_mission(self, workspace_id: str, mission_id: str) -> None:
+        """Permanently delete one Mission and its subcollections."""
         ...
 
     async def transition_mission(
@@ -262,6 +294,10 @@ class FirestoreMissionStore:
             .get()
         )
         return [MissionRecord.model_validate(item.to_dict()) for item in snapshots]
+
+    async def delete_mission(self, workspace_id: str, mission_id: str) -> None:
+        """Delete the Mission document and all event subcollection documents."""
+        await self.client.recursive_delete(self._mission_ref(workspace_id, mission_id))
 
     async def transition_mission(
         self,
@@ -559,7 +595,13 @@ class MissionService:
         reason: str,
     ) -> MissionRecord:
         """Save one essential question and pause the Mission."""
-        await self.load_for_tool(workspace_id, mission_id, session_id)
+        mission = await self.load_for_tool(workspace_id, mission_id, session_id)
+        if mission.clarification is not None:
+            raise MissionError(
+                "CLARIFICATION_ALREADY_USED",
+                "The Mission's initial clarification has already been used.",
+                409,
+            )
         question = question.strip()
         reason = reason.strip()
         if not question or not reason:
@@ -588,6 +630,60 @@ class MissionService:
                 agent="mission_manager",
                 tool="request_clarification",
                 payload={"question": question, "reason": reason},
+                created_at=timestamp,
+            ),
+        )
+
+    async def request_objective_decision(
+        self,
+        workspace_id: str,
+        mission_id: str,
+        session_id: str,
+        proposed_objective: str,
+        reason: str,
+        hard_violations: list[dict[str, Any]],
+    ) -> MissionRecord:
+        """Stop infeasible planning and wait for an explicit user decision."""
+        mission = await self.load_for_tool(workspace_id, mission_id, session_id)
+        proposed_objective = proposed_objective.strip()
+        reason = reason.strip()
+        if not proposed_objective or not reason:
+            raise MissionError(
+                "INVALID_OBJECTIVE_DECISION",
+                "A proposed objective and reason are required.",
+            )
+        if proposed_objective.casefold() == mission.objective.casefold():
+            raise MissionError(
+                "OBJECTIVE_NOT_REFINED",
+                "The proposed objective must differ from the infeasible objective.",
+            )
+        timestamp = _now()
+        decision = ObjectiveDecisionState(
+            proposed_objective=proposed_objective,
+            reason=reason,
+            hard_violations=hard_violations,
+            requested_at=timestamp,
+        )
+        return await self.store.transition_mission(
+            workspace_id,
+            mission_id,
+            {"running"},
+            {
+                "status": "awaiting_objective_decision",
+                "objective_decision": decision.model_dump(mode="python"),
+                "summary": reason,
+                "updated_at": timestamp,
+            },
+            _event(
+                mission_id,
+                "objective_decision_requested",
+                agent="mission_manager",
+                tool="request_objective_decision",
+                payload={
+                    "proposed_objective": proposed_objective,
+                    "reason": reason,
+                    "hard_violations": hard_violations,
+                },
                 created_at=timestamp,
             ),
         )
@@ -679,8 +775,92 @@ class MissionService:
             ),
         )
         return await self._run_agent(
-            mission, f"Answer to your pending clarification: {answer}"
+            mission,
+            (
+                f"Answer to the one initial objective clarification: {answer}. "
+                "Combine this with the original objective, do not ask another "
+                "clarification question, and continue specialist delegation."
+            ),
         )
+
+    async def accept_objective_decision(
+        self, workspace_id: str, mission_id: str
+    ) -> MissionRecord:
+        """Accept the proposed objective and start exactly one new planning attempt."""
+        mission = await self.require_mission(workspace_id, mission_id)
+        decision = mission.objective_decision
+        if (
+            mission.status != "awaiting_objective_decision"
+            or decision is None
+            or decision.status != "pending"
+        ):
+            raise MissionError(
+                "NO_OBJECTIVE_DECISION",
+                "The Mission has no proposed objective awaiting acceptance.",
+                409,
+            )
+        timestamp = _now()
+        accepted = decision.model_copy(
+            update={"status": "accepted", "accepted_at": timestamp}
+        )
+        history = [
+            *mission.objective_history,
+            ObjectiveHistoryEntry(
+                objective=mission.objective,
+                replaced_at=timestamp,
+                reason=decision.reason,
+            ),
+        ]
+        mission = await self.store.transition_mission(
+            workspace_id,
+            mission_id,
+            {"awaiting_objective_decision"},
+            {
+                "status": "running",
+                "objective": decision.proposed_objective,
+                "objective_history": [item.model_dump(mode="python") for item in history],
+                "objective_decision": accepted.model_dump(mode="python"),
+                "summary": None,
+                "updated_at": timestamp,
+            },
+            _event(
+                mission_id,
+                "objective_revision_accepted",
+                payload={
+                    "previous_objective": mission.objective,
+                    "objective": decision.proposed_objective,
+                },
+                created_at=timestamp,
+            ),
+        )
+        return await self._run_agent(
+            mission,
+            (
+                "The user accepted this revised objective: "
+                f"{decision.proposed_objective}. Start one new planning attempt. "
+                "If it is also infeasible, stop and request another explicit "
+                "objective decision; never retry automatically."
+            ),
+        )
+
+    async def discard_objective_decision(
+        self, workspace_id: str, mission_id: str
+    ) -> None:
+        """Permanently delete a Mission after the user rejects its replacement."""
+        mission = await self.require_mission(workspace_id, mission_id)
+        if mission.status != "awaiting_objective_decision":
+            raise MissionError(
+                "NO_OBJECTIVE_DECISION",
+                "Only a Mission awaiting an objective decision can be discarded.",
+                409,
+            )
+        try:
+            await self.store.delete_mission(workspace_id, mission_id)
+        except Exception as error:
+            raise MissionError(
+                "MISSION_UNAVAILABLE", "The Mission could not be discarded.", 503
+            ) from error
+        await self._delete_session_quietly(workspace_id, mission.adk_session_id)
 
     async def _run_agent(self, mission: MissionRecord, message: str) -> MissionRecord:
         """Run the manager until it completes, pauses, or fails."""

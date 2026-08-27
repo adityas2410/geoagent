@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi import File
 from fastapi import Form
 from fastapi import HTTPException
+from fastapi import Response
 from fastapi import UploadFile
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
@@ -261,6 +262,39 @@ async def respond_to_mission(
         )
     except MissionError as error:
         raise_mission_http_error(error)
+
+
+@app.post(
+    "/api/workspaces/{workspace_id}/missions/{mission_id}/objective-decision/accept",
+    response_model=MissionRecord,
+)
+async def accept_mission_objective(
+    workspace_id: str,
+    mission_id: str,
+    service: MissionService = Depends(mission_service_dependency),
+) -> MissionRecord:
+    """Accept the Manager's replacement objective and run one new attempt."""
+    try:
+        return await service.accept_objective_decision(workspace_id, mission_id)
+    except MissionError as error:
+        raise_mission_http_error(error)
+
+
+@app.delete(
+    "/api/workspaces/{workspace_id}/missions/{mission_id}/objective-decision",
+    status_code=204,
+)
+async def discard_mission_objective(
+    workspace_id: str,
+    mission_id: str,
+    service: MissionService = Depends(mission_service_dependency),
+) -> Response:
+    """Discard the proposed replacement and permanently delete the Mission."""
+    try:
+        await service.discard_objective_decision(workspace_id, mission_id)
+    except MissionError as error:
+        raise_mission_http_error(error)
+    return Response(status_code=204)
 
 
 @app.get(

@@ -34,7 +34,7 @@ from .planning_tools import validate_plan
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 # Gemini model used by all four agents.
-MODEL = "gemini-3.5-flash"
+MODEL = "gemini-3.7-flash"
 
 
 # JSON schemas used when the Mission Manager calls each agent.

@@ -20,6 +20,24 @@ python backend/demo_data/build_demo_db.py --planning-date 2026-08-25
 
 The generated `backend/data/geoagent_demo.db` is intentionally gitignored. Its committed schema and builder contain synthetic organizational records only; routes and Mission outputs are produced by GeoAgent rather than stored in the source database.
 
+## Frontend command center
+
+The `frontend` directory is the React, TypeScript, Vite, and Tailwind command
+center. It reads only the GeoAgent API; it contains no seeded operational
+locations, routes, vehicles, or simulated activity.
+
+```bash
+cd frontend
+pnpm install
+copy .env.example .env.local
+pnpm dev
+```
+
+Set `VITE_API_BASE_URL` to the FastAPI service (local default:
+`http://localhost:8000`) and set `VITE_GOOGLE_MAPS_API_KEY` to a browser key
+restricted to the frontend's HTTP referrer. The map reports a configuration
+state instead of substituting fake geography when the key is absent.
+
 ## Connect a SQLite source
 
 Start the API from `backend` after configuring `.env`:

@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Protocol
 from uuid import uuid4
 
+from google.adk.agents.run_config import RunConfig
 from google.adk.events.event import Event
 from google.adk.runners import Runner
 from google.adk.sessions.base_session_service import BaseSessionService
@@ -22,6 +23,7 @@ from .data_sources.source_manager import get_data_source_service
 
 
 APP_NAME = "geoagent"
+DEFAULT_MAX_LLM_CALLS = 30
 SPECIALIST_AGENT_NAMES = frozenset(
     {
         "organizational_data_agent",
@@ -463,12 +465,16 @@ class MissionService:
         session_service: BaseSessionService,
         runner: Any,
         data_source_service: DataSourceService,
+        max_llm_calls: int = DEFAULT_MAX_LLM_CALLS,
     ) -> None:
         """Combine storage, ADK sessions, agent execution, and source access."""
+        if max_llm_calls <= 0:
+            raise ValueError("max_llm_calls must be positive")
         self.store = store
         self.session_service = session_service
         self.runner = runner
         self.data_source_service = data_source_service
+        self.run_config = RunConfig(max_llm_calls=max_llm_calls)
 
     async def create_workspace(self, request: WorkspaceCreate) -> WorkspaceRecord:
         """Create the container that owns sources and Missions."""
@@ -938,6 +944,7 @@ class MissionService:
                 user_id=mission.workspace_id,
                 session_id=mission.adk_session_id,
                 new_message=content,
+                run_config=self.run_config,
             ):
                 await self._record_adk_event(mission, adk_event, activity)
         except Exception as error:
@@ -996,6 +1003,7 @@ class MissionService:
             payload: dict[str, Any] | None = None,
         ) -> None:
             nonlocal index
+            safe_payload = payload or {}
             await self.store.append_event(
                 mission.workspace_id,
                 _event(
@@ -1003,12 +1011,20 @@ class MissionService:
                     event_type,
                     agent=agent,
                     tool=tool,
-                    payload=payload,
+                    payload=safe_payload,
                     source_event_id=event.id,
                     created_at=timestamp,
                     event_id=f"evt_adk_{event.id}_{index}",
                 ),
             )
+            logger.info(
+                "Mission event mission=%s type=%s agent=%s tool=%s",
+                mission.mission_id,
+                event_type,
+                agent or "-",
+                tool or "-",
+            )
+            logger.debug("Mission event payload=%s", safe_payload)
             index += 1
 
         specialist_author = event.author if event.author in SPECIALIST_AGENT_NAMES else None
@@ -1135,6 +1151,14 @@ def build_mission_service_from_environment() -> MissionService:
 
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "geoagent-hackathon")
     database_id = os.getenv("FIRESTORE_DATABASE_ID", "geoagentdb")
+    try:
+        max_llm_calls = int(
+            os.getenv("GEOAGENT_MAX_LLM_CALLS", str(DEFAULT_MAX_LLM_CALLS))
+        )
+    except ValueError as error:
+        raise RuntimeError("GEOAGENT_MAX_LLM_CALLS must be an integer") from error
+    if max_llm_calls <= 0:
+        raise RuntimeError("GEOAGENT_MAX_LLM_CALLS must be positive")
     client = firestore.AsyncClient(project=project_id, database=database_id)
     session_service = FirestoreSessionService(client=client)
     runner = Runner(
@@ -1147,6 +1171,7 @@ def build_mission_service_from_environment() -> MissionService:
         session_service=session_service,
         runner=runner,
         data_source_service=get_data_source_service(),
+        max_llm_calls=max_llm_calls,
     )
 
 

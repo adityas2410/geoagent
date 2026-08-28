@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from fastapi import HTTPException
 from fastapi import Response
 from fastapi import UploadFile
 from pydantic import BaseModel
+from starlette.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 
 from .data_sources.data_source_contracts import DataSourceError
@@ -29,15 +31,32 @@ from .missions import MissionCreate
 from .missions import MissionError
 from .missions import MissionEventListResponse
 from .missions import MissionListResponse
+from .missions import MissionMapResponse
 from .missions import MissionRecord
 from .missions import MissionService
 from .missions import WorkspaceCreate
 from .missions import WorkspaceListResponse
+from .missions import WorkspaceMapResponse
 from .missions import WorkspaceRecord
 from .missions import get_mission_service
 
 
 app = FastAPI(title="GeoAgent API", version="0.1.0")
+
+
+def _cors_origins_from_environment() -> list[str]:
+    """Read an explicit, comma-separated browser-origin allow list."""
+    configured = os.getenv("GEOAGENT_CORS_ORIGINS", "http://localhost:5173")
+    return [origin.strip() for origin in configured.split(",") if origin.strip()]
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins_from_environment(),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
 
 
 class DataSourceResponse(BaseModel):
@@ -230,6 +249,38 @@ async def get_mission(
     """Return the latest saved state for one Mission."""
     try:
         return await service.require_mission(workspace_id, mission_id)
+    except MissionError as error:
+        raise_mission_http_error(error)
+
+
+@app.get(
+    "/api/workspaces/{workspace_id}/missions/{mission_id}/map",
+    response_model=MissionMapResponse,
+)
+async def get_mission_map(
+    workspace_id: str,
+    mission_id: str,
+    service: MissionService = Depends(mission_service_dependency),
+) -> MissionMapResponse:
+    """Return real, display-ready geography and assignments for one Mission."""
+    try:
+        return await service.get_map_state(workspace_id, mission_id)
+    except MissionError as error:
+        raise_mission_http_error(error)
+
+
+@app.get(
+    "/api/workspaces/{workspace_id}/map",
+    response_model=WorkspaceMapResponse,
+)
+async def get_workspace_map(
+    workspace_id: str,
+    include_completed: bool = False,
+    service: MissionService = Depends(mission_service_dependency),
+) -> WorkspaceMapResponse:
+    """Return representative locations for the All Missions map."""
+    try:
+        return await service.list_workspace_map(workspace_id, include_completed)
     except MissionError as error:
         raise_mission_http_error(error)
 

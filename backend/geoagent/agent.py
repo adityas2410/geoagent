@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -25,6 +26,7 @@ from .mission_manager_tools import load_mission_state
 from .mission_manager_tools import publish_plan
 from .mission_manager_tools import request_clarification
 from .mission_manager_tools import request_objective_decision
+from .model_fallback import FallbackGemini
 from .planning_tools import calculate_plan_metrics
 from .planning_tools import optimize_assignments
 from .planning_tools import validate_plan
@@ -33,8 +35,17 @@ from .planning_tools import validate_plan
 # Load GOOGLE_API_KEY from backend/.env.
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
-# Gemini model used by all four agents.
-MODEL = "gemini-3.7-flash"
+# Ordered native-Gemini model chain used by all four agents. Every configured
+# model satisfies the hackathon's Gemini 3.5+ requirement.
+PRIMARY_MODEL = os.getenv("GEOAGENT_PRIMARY_MODEL", "gemini-3.7-flash")
+FALLBACK_MODELS = tuple(
+    model.strip()
+    for model in os.getenv(
+        "GEOAGENT_FALLBACK_MODELS", "gemini-3.6-flash,gemini-3.5-flash"
+    ).split(",")
+    if model.strip()
+)
+MODEL = FallbackGemini(model=PRIMARY_MODEL, fallback_models=FALLBACK_MODELS)
 
 
 # JSON schemas used when the Mission Manager calls each agent.

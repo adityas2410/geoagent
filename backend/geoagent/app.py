@@ -6,6 +6,11 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .observability import configure_observability
+
+
+configure_observability()
+
 from fastapi import Depends
 from fastapi import FastAPI
 from fastapi import File

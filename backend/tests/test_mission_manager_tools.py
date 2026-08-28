@@ -110,6 +110,7 @@ class MissionManagerToolsTest(unittest.IsolatedAsyncioTestCase):
             context,
         )
         self.assertEqual(result["status"], "completed")
+        self.assertTrue(context.actions.skip_summarization)
         self.assertEqual(context.state["mission_status"], "completed")
         stored = await self.service.require_mission(
             self.workspace.workspace_id, mission.mission_id

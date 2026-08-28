@@ -161,6 +161,9 @@ async def publish_plan(
             plan,
         )
         tool_context.state["mission_status"] = "completed"
+        # The published plan is the authoritative final result. Do not spend
+        # another model call summarizing it after the Mission is complete.
+        tool_context.actions.skip_summarization = True
         return {
             "status": mission.status,
             "mission_id": mission.mission_id,

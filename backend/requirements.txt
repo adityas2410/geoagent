@@ -1,6 +1,9 @@
 # Agent framework and Gemini integration
 google-adk>=2.0,<3.0
 google-genai>=1.0,<2.0
+opentelemetry-exporter-gcp-logging
+opentelemetry-exporter-otlp-proto-http
+opentelemetry-instrumentation-google-genai>=0.4b0
 
 # HTTP API
 fastapi>=0.115,<1.0

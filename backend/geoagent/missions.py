@@ -8,7 +8,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, TypeVar
 from uuid import uuid4
 
 from google.adk.agents.run_config import RunConfig
@@ -16,7 +16,7 @@ from google.adk.events.event import Event
 from google.adk.runners import Runner
 from google.adk.sessions.base_session_service import BaseSessionService
 from google.genai import types
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .data_sources.source_manager import DataSourceService
 from .data_sources.source_manager import get_data_source_service
@@ -31,6 +31,7 @@ SPECIALIST_AGENT_NAMES = frozenset(
         "planning_validation_agent",
     }
 )
+MapModel = TypeVar("MapModel", bound=BaseModel)
 
 
 @dataclass
@@ -49,6 +50,7 @@ class _AgentActivityProjection:
 
     delegations: list[_SpecialistDelegation] = field(default_factory=list)
     processed_event_ids: set[str] = field(default_factory=set)
+    map_state: "MissionMapState | None" = None
 
     def begin_event(self, event_id: str) -> bool:
         if event_id in self.processed_event_ids:
@@ -169,6 +171,69 @@ class ObjectiveDecisionState(BaseModel):
     accepted_at: datetime | None = None
 
 
+class MissionMapLocation(BaseModel):
+    """One display-ready, geocoded operational location."""
+
+    location_id: str
+    label: str
+    latitude: float
+    longitude: float
+    place_id: str | None = None
+    source: dict[str, Any] = Field(default_factory=dict)
+
+
+class MissionMapRoute(BaseModel):
+    """One real route returned by a geospatial or optimization tool."""
+
+    route_id: str
+    origin_location_id: str | None = None
+    destination_location_id: str | None = None
+    waypoint_location_ids: list[str] = Field(default_factory=list)
+    encoded_polyline: str | None = None
+    distance_meters: float | None = None
+    duration_seconds: float | None = None
+    resource_id: str | None = None
+
+
+class MissionMapAssignment(BaseModel):
+    """One scheduled resource/task decision safe for map interaction."""
+
+    task_id: str
+    resource_id: str
+    sequence: int
+    start_at: datetime | None = None
+    end_at: datetime | None = None
+    origin_location_id: str | None = None
+    destination_location_id: str | None = None
+    travel_distance_meters: float | None = None
+    travel_duration_seconds: float | None = None
+
+
+class MissionMapAvailability(BaseModel):
+    """Whether a category has been requested, returned, or was unavailable."""
+
+    locations: Literal["not_requested", "available", "unavailable"] = "not_requested"
+    routes: Literal["not_requested", "available", "unavailable"] = "not_requested"
+    assignments: Literal["not_requested", "available", "unavailable"] = "not_requested"
+    metrics: Literal["not_requested", "available", "unavailable"] = "not_requested"
+    validation: Literal["not_requested", "available", "unavailable"] = "not_requested"
+
+
+class MissionMapState(BaseModel):
+    """Persisted frontend projection derived only from safe tool results."""
+
+    revision: int = 0
+    updated_at: datetime
+    is_final: bool = False
+    availability: MissionMapAvailability = Field(default_factory=MissionMapAvailability)
+    locations: list[MissionMapLocation] = Field(default_factory=list)
+    routes: list[MissionMapRoute] = Field(default_factory=list)
+    assignments: list[MissionMapAssignment] = Field(default_factory=list)
+    metrics: dict[str, Any] | None = None
+    validation: dict[str, Any] | None = None
+    warnings: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class MissionRecord(BaseModel):
     """Complete product-facing state saved for one Mission."""
 
@@ -184,6 +249,7 @@ class MissionRecord(BaseModel):
     objective_history: list[ObjectiveHistoryEntry] = Field(default_factory=list)
     objective_decision: ObjectiveDecisionState | None = None
     plan: dict[str, Any] | None = None
+    map_state: MissionMapState | None = None
     error: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -220,6 +286,250 @@ class MissionEventListResponse(BaseModel):
     """API response containing observable activity for one Mission."""
 
     events: list[MissionEventRecord]
+
+
+class MissionMapResponse(BaseModel):
+    """Full interactive-map projection for one selected Mission."""
+
+    mission_id: str
+    status: MissionStatus
+    map_state: MissionMapState
+
+
+class WorkspaceMapMissionSummary(BaseModel):
+    """Compact map data used when no individual Mission is selected."""
+
+    mission_id: str
+    name: str | None = None
+    status: MissionStatus
+    map_revision: int
+    updated_at: datetime
+    is_final: bool
+    locations: list[MissionMapLocation] = Field(default_factory=list)
+
+
+class WorkspaceMapResponse(BaseModel):
+    """Representative locations for active or explicitly requested Missions."""
+
+    missions: list[WorkspaceMapMissionSummary]
+
+
+MAP_TOOL_AVAILABILITY = {
+    "geocode_locations": "locations",
+    "compute_routes": "routes",
+    "optimize_assignments": "assignments",
+    "calculate_plan_metrics": "metrics",
+    "validate_plan": "validation",
+}
+
+
+def _as_float(value: Any) -> float | None:
+    """Accept only finite numeric coordinates and measures for map state."""
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result == result and abs(result) != float("inf") else None
+
+
+def _safe_map_warnings(result: dict[str, Any], tool: str) -> list[dict[str, Any]]:
+    """Keep only structured, frontend-safe tool warnings and errors."""
+    issues: list[dict[str, Any]] = []
+    for key in ("warnings", "errors"):
+        for issue in result.get(key, []):
+            if not isinstance(issue, dict):
+                continue
+            code = issue.get("code")
+            message = issue.get("message")
+            if isinstance(code, str) and isinstance(message, str):
+                issues.append({"tool": tool, "code": code, "message": message})
+    return issues
+
+
+def _safe_map_source(value: Any) -> dict[str, Any]:
+    """Retain reference/provenance identifiers, never arbitrary source records."""
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "source_id",
+        "record_id",
+        "entity_id",
+        "provider",
+        "product",
+        "retrieved_at",
+        "attribution",
+    }
+    return {
+        key: item
+        for key, item in value.items()
+        if key in allowed and isinstance(item, (str, int, float, bool))
+    }
+
+
+def _upsert_models(
+    items: list[MapModel], updates: list[MapModel], attribute: str
+) -> list[MapModel]:
+    """Merge event retries and repeated tool calls by their stable identifier."""
+    indexed = {getattr(item, attribute): item for item in items}
+    for item in updates:
+        indexed[getattr(item, attribute)] = item
+    return list(indexed.values())
+
+
+def _map_state_after_tool_result(
+    state: MissionMapState,
+    tool: str,
+    result: Any,
+    timestamp: datetime,
+) -> MissionMapState:
+    """Project one known tool result without inspecting arbitrary agent content."""
+    category = MAP_TOOL_AVAILABILITY.get(tool)
+    if category is None or not isinstance(result, dict):
+        return state
+
+    availability = state.availability.model_copy(deep=True)
+    status = result.get("status")
+    setattr(
+        availability,
+        category,
+        "unavailable" if status == "error" else "available",
+    )
+    changes: dict[str, Any] = {"availability": availability}
+
+    if tool == "geocode_locations":
+        locations: list[MissionMapLocation] = []
+        for item in result.get("resolved_locations", []):
+            if not isinstance(item, dict) or not isinstance(item.get("reference_id"), str):
+                continue
+            coordinates = item.get("coordinates")
+            if not isinstance(coordinates, dict):
+                continue
+            latitude = _as_float(coordinates.get("latitude"))
+            longitude = _as_float(coordinates.get("longitude"))
+            if latitude is None or longitude is None:
+                continue
+            label = next(
+                (
+                    value
+                    for value in (item.get("name"), item.get("formatted_address"), item.get("reference_id"))
+                    if isinstance(value, str) and value.strip()
+                ),
+                item["reference_id"],
+            )
+            locations.append(
+                MissionMapLocation(
+                    location_id=item["reference_id"],
+                    label=label,
+                    latitude=latitude,
+                    longitude=longitude,
+                    place_id=item.get("place_id") if isinstance(item.get("place_id"), str) else None,
+                    source=_safe_map_source(item.get("source")),
+                )
+            )
+        changes["locations"] = _upsert_models(state.locations, locations, "location_id")
+
+    elif tool == "compute_routes":
+        routes: list[MissionMapRoute] = []
+        for item in result.get("routes", []):
+            if not isinstance(item, dict):
+                continue
+            origin = item.get("origin_reference_id")
+            destination = item.get("destination_reference_id")
+            index = item.get("route_index", 0)
+            if not isinstance(origin, str) or not isinstance(destination, str):
+                continue
+            waypoint_ids = [
+                value for value in item.get("waypoint_reference_ids", []) if isinstance(value, str)
+            ]
+            route_id = f"route:{origin}:{destination}:{','.join(waypoint_ids)}:{index}"
+            routes.append(
+                MissionMapRoute(
+                    route_id=route_id,
+                    origin_location_id=origin,
+                    destination_location_id=destination,
+                    waypoint_location_ids=waypoint_ids,
+                    encoded_polyline=item.get("encoded_polyline") if isinstance(item.get("encoded_polyline"), str) else None,
+                    distance_meters=_as_float(item.get("distance_meters")),
+                    duration_seconds=_as_float(item.get("duration_seconds")),
+                )
+            )
+        changes["routes"] = _upsert_models(state.routes, routes, "route_id")
+
+    elif tool == "optimize_assignments":
+        plan = result.get("plan")
+        if isinstance(plan, dict):
+            assignments: list[MissionMapAssignment] = []
+            for item in plan.get("assignments", []):
+                if not isinstance(item, dict):
+                    continue
+                task_id, resource_id = item.get("task_id"), item.get("resource_id")
+                sequence = item.get("sequence")
+                if not isinstance(task_id, str) or not isinstance(resource_id, str) or not isinstance(sequence, int):
+                    continue
+                try:
+                    assignments.append(
+                        MissionMapAssignment(
+                            task_id=task_id,
+                            resource_id=resource_id,
+                            sequence=sequence,
+                            start_at=item.get("start_at"),
+                            end_at=item.get("end_at"),
+                            origin_location_id=item.get("origin_location_id") if isinstance(item.get("origin_location_id"), str) else None,
+                            destination_location_id=item.get("destination_location_id") if isinstance(item.get("destination_location_id"), str) else None,
+                            travel_distance_meters=_as_float(item.get("travel_distance_meters")),
+                            travel_duration_seconds=_as_float(item.get("travel_duration_seconds")),
+                        )
+                    )
+                except ValidationError:
+                    continue
+            changes["assignments"] = _upsert_models(
+                state.assignments, assignments, "task_id"
+            )
+            optimized_routes: list[MissionMapRoute] = []
+            for schedule in plan.get("resource_schedules", []):
+                if not isinstance(schedule, dict) or not isinstance(schedule.get("resource_id"), str):
+                    continue
+                resource_id = schedule["resource_id"]
+                polyline = schedule.get("encoded_polyline")
+                if isinstance(polyline, str) and polyline:
+                    optimized_routes.append(
+                        MissionMapRoute(
+                            route_id=f"optimized:{resource_id}",
+                            resource_id=resource_id,
+                            encoded_polyline=polyline,
+                        )
+                    )
+            changes["routes"] = _upsert_models(
+                state.routes, optimized_routes, "route_id"
+            )
+
+    elif tool == "calculate_plan_metrics" and isinstance(result.get("metrics"), dict):
+        changes["metrics"] = result["metrics"]
+
+    elif tool == "validate_plan":
+        changes["validation"] = {
+            "feasible": result.get("feasible"),
+            "hard_violations": result.get("hard_violations", result.get("violations", [])),
+            "warnings": result.get("warnings", []),
+        }
+
+    warnings = [*state.warnings, *_safe_map_warnings(result, tool)]
+    unique_warnings = {
+        json.dumps(warning, sort_keys=True): warning for warning in warnings
+    }
+    changes["warnings"] = list(unique_warnings.values())
+    return state.model_copy(
+        update={**changes, "revision": state.revision + 1, "updated_at": timestamp}
+    )
+
+
+def _final_map_state(state: MissionMapState, timestamp: datetime) -> MissionMapState:
+    """Close a map snapshot only when the Mission Manager publishes a plan."""
+    if state.is_final:
+        return state
+    return state.model_copy(
+        update={"is_final": True, "revision": state.revision + 1, "updated_at": timestamp}
+    )
 
 
 class MissionStore(Protocol):
@@ -272,6 +582,15 @@ class MissionStore(Protocol):
         self, workspace_id: str, event: MissionEventRecord
     ) -> None:
         """Save one observable Mission event."""
+        ...
+
+    async def append_event_and_map_state(
+        self,
+        workspace_id: str,
+        event: MissionEventRecord,
+        map_state: MissionMapState,
+    ) -> None:
+        """Atomically save a visible event and the map state it produced."""
         ...
 
     async def list_events(
@@ -408,6 +727,24 @@ class FirestoreMissionStore:
         await self._event_ref(workspace_id, event.mission_id, event.event_id).set(
             event.model_dump(mode="python")
         )
+
+    async def append_event_and_map_state(
+        self,
+        workspace_id: str,
+        event: MissionEventRecord,
+        map_state: MissionMapState,
+    ) -> None:
+        """Commit a tool event and its derived interactive map state together."""
+        batch = self.client.batch()
+        batch.update(
+            self._mission_ref(workspace_id, event.mission_id),
+            {"map_state": map_state.model_dump(mode="python")},
+        )
+        batch.set(
+            self._event_ref(workspace_id, event.mission_id, event.event_id),
+            event.model_dump(mode="python"),
+        )
+        await batch.commit()
 
     async def list_events(
         self, workspace_id: str, mission_id: str
@@ -562,6 +899,7 @@ class MissionService:
             objective=objective,
             authorized_source_ids=authorized_ids,
             status="created",
+            map_state=MissionMapState(updated_at=timestamp),
             created_at=timestamp,
             updated_at=timestamp,
         )
@@ -643,6 +981,44 @@ class MissionService:
             raise MissionError(
                 "MISSION_UNAVAILABLE", "Mission events could not be listed.", 503
             ) from error
+
+    @staticmethod
+    def _map_state_for(mission: MissionRecord) -> MissionMapState:
+        """Give pre-map-contract Missions an empty, truthful projection."""
+        return mission.map_state or MissionMapState(updated_at=mission.updated_at)
+
+    async def get_map_state(
+        self, workspace_id: str, mission_id: str
+    ) -> MissionMapResponse:
+        """Return the selected Mission's map projection."""
+        mission = await self.require_mission(workspace_id, mission_id)
+        return MissionMapResponse(
+            mission_id=mission.mission_id,
+            status=mission.status,
+            map_state=self._map_state_for(mission),
+        )
+
+    async def list_workspace_map(
+        self, workspace_id: str, include_completed: bool = False
+    ) -> WorkspaceMapResponse:
+        """Return representative locations for the All Missions map."""
+        missions = await self.list_missions(workspace_id)
+        if not include_completed:
+            missions = [mission for mission in missions if mission.status != "completed"]
+        return WorkspaceMapResponse(
+            missions=[
+                WorkspaceMapMissionSummary(
+                    mission_id=mission.mission_id,
+                    name=mission.name,
+                    status=mission.status,
+                    map_revision=self._map_state_for(mission).revision,
+                    updated_at=self._map_state_for(mission).updated_at,
+                    is_final=self._map_state_for(mission).is_final,
+                    locations=self._map_state_for(mission).locations,
+                )
+                for mission in missions
+            ]
+        )
 
     async def load_for_tool(
         self, workspace_id: str, mission_id: str, session_id: str
@@ -777,6 +1153,8 @@ class MissionService:
                 "INVALID_PLAN", "Mission name, summary, and a non-empty plan are required."
             )
         timestamp = _now()
+        current = await self.require_mission(workspace_id, mission_id)
+        map_state = _final_map_state(self._map_state_for(current), timestamp)
         return await self.store.transition_mission(
             workspace_id,
             mission_id,
@@ -786,6 +1164,7 @@ class MissionService:
                 "name": mission_name,
                 "summary": summary,
                 "plan": plan,
+                "map_state": map_state.model_dump(mode="python"),
                 "error": None,
                 "updated_at": timestamp,
                 "completed_at": timestamp,
@@ -993,6 +1372,9 @@ class MissionService:
         if not activity.begin_event(event.id):
             return
         timestamp = datetime.fromtimestamp(event.timestamp, tz=timezone.utc)
+        if activity.map_state is None:
+            current = await self.require_mission(mission.workspace_id, mission.mission_id)
+            activity.map_state = self._map_state_for(current)
         index = 0
 
         async def append_projected_event(
@@ -1004,19 +1386,31 @@ class MissionService:
         ) -> None:
             nonlocal index
             safe_payload = payload or {}
-            await self.store.append_event(
-                mission.workspace_id,
-                _event(
-                    mission.mission_id,
-                    event_type,
-                    agent=agent,
-                    tool=tool,
-                    payload=safe_payload,
-                    source_event_id=event.id,
-                    created_at=timestamp,
-                    event_id=f"evt_adk_{event.id}_{index}",
-                ),
+            projected = _event(
+                mission.mission_id,
+                event_type,
+                agent=agent,
+                tool=tool,
+                payload=safe_payload,
+                source_event_id=event.id,
+                created_at=timestamp,
+                event_id=f"evt_adk_{event.id}_{index}",
             )
+            next_map_state = activity.map_state
+            if event_type == "tool_result" and tool:
+                next_map_state = _map_state_after_tool_result(
+                    activity.map_state,
+                    tool,
+                    safe_payload.get("result"),
+                    timestamp,
+                )
+            if next_map_state != activity.map_state:
+                await self.store.append_event_and_map_state(
+                    mission.workspace_id, projected, next_map_state
+                )
+                activity.map_state = next_map_state
+            else:
+                await self.store.append_event(mission.workspace_id, projected)
             logger.info(
                 "Mission event mission=%s type=%s agent=%s tool=%s",
                 mission.mission_id,
@@ -1195,11 +1589,19 @@ __all__ = [
     "MissionError",
     "MissionEventListResponse",
     "MissionEventRecord",
+    "MissionMapAssignment",
+    "MissionMapAvailability",
+    "MissionMapLocation",
+    "MissionMapResponse",
+    "MissionMapRoute",
+    "MissionMapState",
     "MissionListResponse",
     "MissionRecord",
     "MissionService",
     "WorkspaceCreate",
     "WorkspaceListResponse",
+    "WorkspaceMapMissionSummary",
+    "WorkspaceMapResponse",
     "WorkspaceRecord",
     "configure_mission_service",
     "get_mission_service",

@@ -29,6 +29,7 @@ from geoagent.missions import ClarificationResponse  # noqa: E402
 from geoagent.missions import MissionCreate  # noqa: E402
 from geoagent.missions import MissionError  # noqa: E402
 from geoagent.missions import MissionEventRecord  # noqa: E402
+from geoagent.missions import MissionMapState  # noqa: E402
 from geoagent.missions import MissionRecord  # noqa: E402
 from geoagent.missions import MissionService  # noqa: E402
 from geoagent.missions import WorkspaceCreate  # noqa: E402
@@ -115,6 +116,21 @@ class InMemoryMissionStore:
         existing = self.events.setdefault(key, [])
         existing[:] = [item for item in existing if item.event_id != event.event_id]
         existing.append(event.model_copy(deep=True))
+
+    async def append_event_and_map_state(
+        self,
+        workspace_id: str,
+        event: MissionEventRecord,
+        map_state: MissionMapState,
+    ) -> None:
+        key = (workspace_id, event.mission_id)
+        current = self.missions.get(key)
+        if current is None:
+            raise MissionError("MISSION_NOT_FOUND", "The Mission was not found.", 404)
+        self.missions[key] = current.model_copy(
+            update={"map_state": map_state.model_copy(deep=True)}
+        )
+        await self.append_event(workspace_id, event)
 
     async def list_events(
         self, workspace_id: str, mission_id: str
@@ -476,6 +492,134 @@ class MissionServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("query_source", serialized)
         self.assertNotIn("hidden reasoning", serialized)
 
+    async def test_map_projection_uses_only_known_safe_tool_results(self) -> None:
+        mission = await self.service.create_mission(
+            self.workspace.workspace_id,
+            MissionCreate(objective="Plan tomorrow's deliveries."),
+        )
+        self.service.store.missions[(self.workspace.workspace_id, mission.mission_id)] = (
+            mission.model_copy(update={"status": "running"})
+        )
+
+        async def record(tool: str, response: dict) -> None:
+            await self.service._record_adk_event(
+                mission,
+                Event(
+                    author="geospatial_intelligence_agent",
+                    content=types.Content(
+                        role="user",
+                        parts=[types.Part.from_function_response(name=tool, response=response)],
+                    ),
+                ),
+            )
+
+        await record(
+            "geocode_locations",
+            {
+                "status": "success",
+                "resolved_locations": [
+                    {
+                        "reference_id": "DEPOT-1",
+                        "name": "Main Depot",
+                        "place_id": "place-depot",
+                        "coordinates": {"latitude": 9.9312, "longitude": 76.2673},
+                        "source": {"source_id": self.source.source_id, "secret": "omit-me"},
+                    }
+                ],
+                "warnings": [],
+                "errors": [],
+            },
+        )
+        await record(
+            "compute_routes",
+            {
+                "status": "success",
+                "routes": [
+                    {
+                        "route_index": 0,
+                        "origin_reference_id": "DEPOT-1",
+                        "destination_reference_id": "STOP-1",
+                        "waypoint_reference_ids": [],
+                        "encoded_polyline": "encoded-route",
+                        "distance_meters": 12345,
+                        "duration_seconds": 900,
+                    }
+                ],
+                "warnings": [],
+                "errors": [],
+            },
+        )
+        await record(
+            "optimize_assignments",
+            {
+                "status": "success",
+                "plan": {
+                    "assignments": [
+                        {
+                            "task_id": "JOB-1",
+                            "resource_id": "VEH-1",
+                            "sequence": 1,
+                            "start_at": "2026-08-25T09:00:00Z",
+                            "end_at": "2026-08-25T10:00:00Z",
+                            "origin_location_id": "DEPOT-1",
+                            "destination_location_id": "STOP-1",
+                            "travel_distance_meters": 12345,
+                            "travel_duration_seconds": 900,
+                        }
+                    ],
+                    "resource_schedules": [
+                        {"resource_id": "VEH-1", "encoded_polyline": "optimized-route"}
+                    ],
+                },
+            },
+        )
+        await record(
+            "calculate_plan_metrics",
+            {"status": "success", "metrics": {"task_count": 1}},
+        )
+        await record(
+            "validate_plan",
+            {
+                "status": "success",
+                "feasible": True,
+                "hard_violations": [],
+                "warnings": [{"code": "WEATHER", "message": "Monitor rain."}],
+            },
+        )
+        await record(
+            "query_source",
+            {"status": "success", "rows": [{"secret": "must-not-appear"}]},
+        )
+
+        map_response = await self.service.get_map_state(
+            self.workspace.workspace_id, mission.mission_id
+        )
+        state = map_response.map_state
+        self.assertEqual(state.availability.locations, "available")
+        self.assertEqual(state.availability.routes, "available")
+        self.assertEqual(state.availability.assignments, "available")
+        self.assertEqual(state.locations[0].label, "Main Depot")
+        self.assertEqual(state.routes[0].encoded_polyline, "encoded-route")
+        self.assertEqual(state.assignments[0].resource_id, "VEH-1")
+        self.assertEqual(state.metrics, {"task_count": 1})
+        self.assertTrue(state.validation["feasible"])
+        self.assertGreaterEqual(state.revision, 5)
+        serialized_map = str(state.model_dump(mode="json"))
+        self.assertNotIn("must-not-appear", serialized_map)
+        self.assertNotIn("omit-me", serialized_map)
+
+        completed = await self.service.publish_plan(
+            self.workspace.workspace_id,
+            mission.mission_id,
+            mission.adk_session_id,
+            "Map Test",
+            "A plan with real map data.",
+            {"result": "published"},
+        )
+        self.assertTrue(completed.map_state.is_final)
+        events = await self.service.list_events(self.workspace.workspace_id, mission.mission_id)
+        self.assertTrue(any(event.tool == "validate_plan" for event in events))
+
     async def test_specialist_activity_projection(self) -> None:
         runner = ActivityProjectionRunner()
         data_service, service, _sessions = build_services(self.root / "activity", runner)
@@ -689,6 +833,42 @@ class MissionApiTest(unittest.TestCase):
         self.assertIn("mission_created", event_types)
         self.assertIn("clarification_requested", event_types)
         self.assertIn("plan_published", event_types)
+
+        mission_map = self.client.get(
+            f"/api/workspaces/{workspace_id}/missions/{mission_id}/map"
+        )
+        self.assertEqual(mission_map.status_code, 200, mission_map.text)
+        self.assertTrue(mission_map.json()["map_state"]["is_final"])
+
+        active = self.client.post(
+            f"/api/workspaces/{workspace_id}/missions",
+            json={"objective": "Plan next week's deliveries."},
+        )
+        self.assertEqual(active.status_code, 201, active.text)
+        workspace_map = self.client.get(f"/api/workspaces/{workspace_id}/map")
+        self.assertEqual(workspace_map.status_code, 200, workspace_map.text)
+        self.assertEqual(
+            [item["mission_id"] for item in workspace_map.json()["missions"]],
+            [active.json()["mission_id"]],
+        )
+        all_missions_map = self.client.get(
+            f"/api/workspaces/{workspace_id}/map?include_completed=true"
+        )
+        self.assertEqual(len(all_missions_map.json()["missions"]), 2)
+
+    def test_local_vite_origin_receives_cors_headers(self) -> None:
+        response = self.client.options(
+            "/health",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            response.headers.get("access-control-allow-origin"),
+            "http://localhost:5173",
+        )
 
     def test_objective_accept_and_discard_endpoints(self) -> None:
         runner = ObjectiveDecisionRunner(feasible_after_acceptance=True)

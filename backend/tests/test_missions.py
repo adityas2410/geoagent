@@ -132,9 +132,11 @@ class ClarifyThenPublishRunner:
     def __init__(self) -> None:
         self.service: MissionService | None = None
         self.calls = 0
+        self.run_configs = []
 
-    async def run_async(self, *, user_id, session_id, new_message):
+    async def run_async(self, *, user_id, session_id, new_message, run_config):
         self.calls += 1
+        self.run_configs.append(run_config)
         assert self.service is not None
         if self.calls == 1:
             await self.service.request_clarification(
@@ -175,7 +177,7 @@ class ObjectiveDecisionRunner:
         self.calls = 0
         self.feasible_after_acceptance = feasible_after_acceptance
 
-    async def run_async(self, *, user_id, session_id, new_message):
+    async def run_async(self, *, user_id, session_id, new_message, run_config):
         self.calls += 1
         assert self.service is not None
         if self.calls == 1 or not self.feasible_after_acceptance:
@@ -220,7 +222,7 @@ class ActivityProjectionRunner:
     def __init__(self) -> None:
         self.service: MissionService | None = None
 
-    async def run_async(self, *, user_id, session_id, new_message):
+    async def run_async(self, *, user_id, session_id, new_message, run_config):
         assert self.service is not None
         for index, (specialist, tool_name) in enumerate(self.specialist_sequence):
             delegation_id = f"delegation-{index}"
@@ -420,6 +422,7 @@ class MissionServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(waiting.status, "awaiting_input")
         self.assertEqual(waiting.clarification.status, "open")
+        self.assertEqual(self.service.runner.run_configs[0].max_llm_calls, 30)
 
         with self.assertRaises(MissionError) as raised:
             await self.service.run_mission(self.workspace.workspace_id, mission.mission_id)
@@ -433,6 +436,10 @@ class MissionServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed.status, "completed")
         self.assertEqual(completed.clarification.answer, "Thirty minutes.")
         self.assertEqual(completed.name, "Tomorrow's Operations")
+        self.assertEqual(len(self.service.runner.run_configs), 2)
+        self.assertTrue(
+            all(config.max_llm_calls == 30 for config in self.service.runner.run_configs)
+        )
 
         with self.assertRaises(MissionError) as raised:
             await self.service.respond_to_clarification(

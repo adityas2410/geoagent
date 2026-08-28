@@ -111,6 +111,38 @@ DELETE /api/workspaces/{workspace_id}/missions/{mission_id}/objective-decision
 
 A completed Mission stores its plan and frontend-safe events in Firestore.
 
+### Live map projection
+
+Each Mission also stores a compact, frontend-ready `map_state`. It is a
+projection of safe, normalized tool results rather than a second agent plan:
+geocoding contributes locations, Routes contributes real encoded polylines,
+optimization contributes assignments, and deterministic tools contribute metrics
+and validation. It never copies raw organizational query rows or hidden model
+reasoning.
+
+The frontend can poll these endpoints while the existing `/run` request remains
+in progress:
+
+```text
+GET /api/workspaces/{workspace_id}/missions/{mission_id}/map
+  -> selected Mission locations, routes, assignments, metrics, validation, warnings,
+     availability flags, revision, and final-state marker
+
+GET /api/workspaces/{workspace_id}/map?include_completed=false
+  -> representative locations for active Missions; set include_completed=true for history
+```
+
+`map_state.revision` increases only when a real map-relevant tool result is
+persisted or the Manager publishes the plan. `availability` explicitly reports
+whether locations, routes, assignments, metrics, or validation have not yet
+been requested, are available, or were unavailable. A Mission may therefore
+have a partial or empty map without the UI inventing geography.
+
+For local Vite development, set `GEOAGENT_CORS_ORIGINS` to an explicit,
+comma-separated list of browser origins (the default is
+`http://localhost:5173`). Set the deployed frontend origin explicitly for
+Cloud Run; wildcard origins are not used.
+
 ## Firestore structure
 
 Firestore alternates between collections, which contain records, and documents, which contain fields and may have child collections. GeoAgent uses this structure:

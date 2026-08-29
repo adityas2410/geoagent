@@ -7,6 +7,7 @@ from typing import Any
 from google.adk.tools.tool_context import ToolContext
 
 from .missions import MissionError
+from .missions import OperationalDataRequirements
 from .missions import get_mission_service
 
 
@@ -141,6 +142,7 @@ async def publish_plan(
     mission_name: str,
     summary: str,
     plan: dict[str, Any],
+    operational_data_requirements: OperationalDataRequirements,
     tool_context: ToolContext,
 ) -> dict[str, Any]:
     """Save the Mission name, summary, and validated final plan.
@@ -149,6 +151,7 @@ async def publish_plan(
         mission_name: Short name generated for this Mission.
         summary: Concise explanation of the final plan.
         plan: Complete operational plan supported by specialist findings.
+        operational_data_requirements: Required or not-applicable structured evidence.
     """
     try:
         workspace_id, mission_id, session_id = _identity(tool_context)
@@ -159,6 +162,7 @@ async def publish_plan(
             mission_name,
             summary,
             plan,
+            operational_data_requirements,
         )
         tool_context.state["mission_status"] = "completed"
         # The published plan is the authoritative final result. Do not spend

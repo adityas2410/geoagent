@@ -23,7 +23,9 @@ from geoagent.missions import MissionCreate  # noqa: E402
 from geoagent.missions import MissionEventRecord  # noqa: E402
 from geoagent.missions import WorkspaceCreate  # noqa: E402
 from geoagent.missions import configure_mission_service  # noqa: E402
+from test_missions import NON_GEOGRAPHIC_REQUIREMENTS  # noqa: E402
 from test_missions import build_services  # noqa: E402
+from test_missions import seed_required_plan_evidence  # noqa: E402
 
 
 class MissionManagerToolsTest(unittest.IsolatedAsyncioTestCase):
@@ -103,10 +105,14 @@ class MissionManagerToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(denied["error"]["code"], "MISSION_ACCESS_DENIED")
 
         context = self.context(mission.mission_id)
+        seed_required_plan_evidence(
+            self.service, self.workspace.workspace_id, mission.mission_id
+        )
         result = await publish_plan(
             "Tomorrow's Operations",
             "A validated operational plan.",
             {"assignments": [{"task": "JOB-001", "resource": "VEH-001"}]},
+            NON_GEOGRAPHIC_REQUIREMENTS,
             context,
         )
         self.assertEqual(result["status"], "completed")
@@ -146,7 +152,7 @@ class MissionManagerToolsTest(unittest.IsolatedAsyncioTestCase):
         published = FunctionTool(publish_plan)._get_declaration()
         self.assertEqual(
             set(published.parameters_json_schema["properties"]),
-            {"mission_name", "summary", "plan"},
+            {"mission_name", "summary", "plan", "operational_data_requirements"},
         )
         objective = FunctionTool(request_objective_decision)._get_declaration()
         self.assertEqual(

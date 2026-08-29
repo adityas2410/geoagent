@@ -29,12 +29,55 @@ from geoagent.missions import ClarificationResponse  # noqa: E402
 from geoagent.missions import MissionCreate  # noqa: E402
 from geoagent.missions import MissionError  # noqa: E402
 from geoagent.missions import MissionEventRecord  # noqa: E402
+from geoagent.missions import MissionMapAssignment  # noqa: E402
+from geoagent.missions import MissionMapAvailability  # noqa: E402
 from geoagent.missions import MissionMapState  # noqa: E402
 from geoagent.missions import MissionRecord  # noqa: E402
 from geoagent.missions import MissionService  # noqa: E402
+from geoagent.missions import OperationalDataRequirements  # noqa: E402
 from geoagent.missions import WorkspaceCreate  # noqa: E402
 from geoagent.missions import WorkspaceRecord  # noqa: E402
 from geoagent.missions import build_mission_service_from_environment  # noqa: E402
+
+
+NON_GEOGRAPHIC_REQUIREMENTS = OperationalDataRequirements.model_validate(
+    {
+        "locations": {"status": "not_applicable", "reason": "The fixture has no physical locations."},
+        "routes": {"status": "not_applicable", "reason": "The fixture has no travel between locations."},
+        "assignments": {"status": "required"},
+        "metrics": {"status": "required"},
+        "validation": {"status": "required"},
+    }
+)
+
+GEOGRAPHIC_REQUIREMENTS = OperationalDataRequirements.model_validate(
+    {
+        "locations": {"status": "required"},
+        "routes": {"status": "required"},
+        "assignments": {"status": "required"},
+        "metrics": {"status": "required"},
+        "validation": {"status": "required"},
+    }
+)
+
+
+def seed_required_plan_evidence(service: MissionService, workspace_id: str, mission_id: str) -> None:
+    """Provide test-only persisted projection evidence for lifecycle runners."""
+    key = (workspace_id, mission_id)
+    mission = service.store.missions[key]
+    state = mission.map_state.model_copy(
+        update={
+            "availability": MissionMapAvailability(
+                assignments="available", metrics="available", validation="available"
+            ),
+            "assignments": [
+                MissionMapAssignment(task_id="TASK-1", resource_id="RESOURCE-1", sequence=1)
+            ],
+            "metrics": {"assigned_task_count": 1},
+            "validation": {"feasible": True, "hard_violations": [], "warnings": []},
+        }
+    )
+    service.store.missions[key] = mission.model_copy(update={"map_state": state})
 
 
 class InMemoryMissionStore:
@@ -195,6 +238,7 @@ class ClarifyThenPublishRunner:
                 ),
             )
         else:
+            seed_required_plan_evidence(self.service, user_id, session_id)
             await self.service.publish_plan(
                 user_id,
                 session_id,
@@ -202,6 +246,7 @@ class ClarifyThenPublishRunner:
                 "Tomorrow's Operations",
                 "A validated operational plan.",
                 {"assignments": [{"task": "JOB-001", "resource": "VEH-001"}]},
+                NON_GEOGRAPHIC_REQUIREMENTS,
             )
             yield Event(
                 author="mission_manager",
@@ -233,6 +278,7 @@ class ObjectiveDecisionRunner:
             )
             text = "Objective decision requested."
         else:
+            seed_required_plan_evidence(self.service, user_id, session_id)
             await self.service.publish_plan(
                 user_id,
                 session_id,
@@ -240,6 +286,7 @@ class ObjectiveDecisionRunner:
                 "Capacity-Aware Operations",
                 "The accepted objective has a validated plan.",
                 {"assignments": [{"task": "JOB-001", "resource": "VEH-001"}]},
+                NON_GEOGRAPHIC_REQUIREMENTS,
             )
             text = "Plan published."
         yield Event(
@@ -339,6 +386,7 @@ class ActivityProjectionRunner:
             if index == 0:
                 yield completed
 
+        seed_required_plan_evidence(self.service, user_id, session_id)
         await self.service.publish_plan(
             user_id,
             session_id,
@@ -346,6 +394,7 @@ class ActivityProjectionRunner:
             "Tomorrow's Operations",
             "A validated operational plan.",
             {"assignments": [{"task": "JOB-001", "resource": "VEH-001"}]},
+            NON_GEOGRAPHIC_REQUIREMENTS,
         )
         yield Event(
             author="mission_manager",
@@ -640,10 +689,78 @@ class MissionServiceTest(unittest.IsolatedAsyncioTestCase):
             "Map Test",
             "A plan with real map data.",
             {"result": "published"},
+            GEOGRAPHIC_REQUIREMENTS,
         )
         self.assertTrue(completed.map_state.is_final)
         events = await self.service.list_events(self.workspace.workspace_id, mission.mission_id)
         self.assertTrue(any(event.tool == "validate_plan" for event in events))
+
+    async def test_publish_blocks_missing_required_projection_evidence(self) -> None:
+        mission = await self.service.create_mission(
+            self.workspace.workspace_id,
+            MissionCreate(objective="Plan physical operational work."),
+        )
+        self.service.store.missions[(self.workspace.workspace_id, mission.mission_id)] = (
+            mission.model_copy(update={"status": "running"})
+        )
+        with self.assertRaises(MissionError) as raised:
+            await self.service.publish_plan(
+                self.workspace.workspace_id,
+                mission.mission_id,
+                mission.adk_session_id,
+                "Incomplete Plan",
+                "This must not publish without structured evidence.",
+                {"result": "unsupported"},
+                GEOGRAPHIC_REQUIREMENTS,
+            )
+        self.assertEqual(raised.exception.code, "OPERATIONAL_DATA_INCOMPLETE")
+        unchanged = await self.service.require_mission(
+            self.workspace.workspace_id, mission.mission_id
+        )
+        self.assertEqual(unchanged.status, "running")
+
+        seed_required_plan_evidence(self.service, self.workspace.workspace_id, mission.mission_id)
+        key = (self.workspace.workspace_id, mission.mission_id)
+        seeded = self.service.store.missions[key]
+        self.service.store.missions[key] = seeded.model_copy(
+            update={"map_state": seeded.map_state.model_copy(update={"assignments": []})}
+        )
+        with self.assertRaises(MissionError) as empty_raised:
+            await self.service.publish_plan(
+                self.workspace.workspace_id,
+                mission.mission_id,
+                mission.adk_session_id,
+                "Empty Assignment Plan",
+                "This must not publish with an empty required assignment result.",
+                {"result": "unsupported"},
+                NON_GEOGRAPHIC_REQUIREMENTS,
+            )
+        self.assertEqual(empty_raised.exception.code, "OPERATIONAL_DATA_INCOMPLETE")
+
+    async def test_publish_persists_not_applicable_reasons(self) -> None:
+        mission = await self.service.create_mission(
+            self.workspace.workspace_id,
+            MissionCreate(objective="Schedule non-geographic operational work."),
+        )
+        self.service.store.missions[(self.workspace.workspace_id, mission.mission_id)] = (
+            mission.model_copy(update={"status": "running"})
+        )
+        seed_required_plan_evidence(self.service, self.workspace.workspace_id, mission.mission_id)
+        completed = await self.service.publish_plan(
+            self.workspace.workspace_id,
+            mission.mission_id,
+            mission.adk_session_id,
+            "Non-geographic Operations",
+            "A validated assignment plan without physical travel.",
+            {"result": "published"},
+            NON_GEOGRAPHIC_REQUIREMENTS,
+        )
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(completed.map_state.availability.locations, "not_applicable")
+        self.assertEqual(
+            completed.map_state.availability_reasons["routes"],
+            "The fixture has no travel between locations.",
+        )
 
     async def test_specialist_activity_projection(self) -> None:
         runner = ActivityProjectionRunner()

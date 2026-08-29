@@ -16,7 +16,7 @@ from google.adk.events.event import Event
 from google.adk.runners import Runner
 from google.adk.sessions.base_session_service import BaseSessionService
 from google.genai import types
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from .data_sources.source_manager import DataSourceService
 from .data_sources.source_manager import get_data_source_service
@@ -218,11 +218,43 @@ class MissionMapAssignment(BaseModel):
 class MissionMapAvailability(BaseModel):
     """Whether a category has been requested, returned, or was unavailable."""
 
-    locations: Literal["not_requested", "available", "unavailable"] = "not_requested"
-    routes: Literal["not_requested", "available", "unavailable"] = "not_requested"
-    assignments: Literal["not_requested", "available", "unavailable"] = "not_requested"
-    metrics: Literal["not_requested", "available", "unavailable"] = "not_requested"
-    validation: Literal["not_requested", "available", "unavailable"] = "not_requested"
+    locations: Literal["not_requested", "available", "unavailable", "not_applicable"] = "not_requested"
+    routes: Literal["not_requested", "available", "unavailable", "not_applicable"] = "not_requested"
+    assignments: Literal["not_requested", "available", "unavailable", "not_applicable"] = "not_requested"
+    metrics: Literal["not_requested", "available", "unavailable", "not_applicable"] = "not_requested"
+    validation: Literal["not_requested", "available", "unavailable", "not_applicable"] = "not_requested"
+
+
+class OperationalDataRequirement(BaseModel):
+    """One safe publication requirement declared by the Mission Manager."""
+
+    status: Literal["required", "not_applicable"]
+    reason: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_reason(self) -> OperationalDataRequirement:
+        if self.status == "not_applicable" and not (self.reason or "").strip():
+            raise ValueError("a not_applicable requirement needs a concise reason")
+        if self.status == "required" and self.reason is not None:
+            raise ValueError("a required requirement cannot include a reason")
+        return self
+
+
+class OperationalDataRequirements(BaseModel):
+    """Evidence required before a manager may publish an actionable plan."""
+
+    locations: OperationalDataRequirement
+    routes: OperationalDataRequirement
+    assignments: OperationalDataRequirement
+    metrics: OperationalDataRequirement
+    validation: OperationalDataRequirement
+
+    @model_validator(mode="after")
+    def enforce_core_requirements(self) -> OperationalDataRequirements:
+        for category in ("assignments", "metrics", "validation"):
+            if getattr(self, category).status != "required":
+                raise ValueError(f"{category} must be required for a completed actionable Mission")
+        return self
 
 
 class MissionMapState(BaseModel):
@@ -232,6 +264,7 @@ class MissionMapState(BaseModel):
     updated_at: datetime
     is_final: bool = False
     availability: MissionMapAvailability = Field(default_factory=MissionMapAvailability)
+    availability_reasons: dict[str, str] = Field(default_factory=dict)
     locations: list[MissionMapLocation] = Field(default_factory=list)
     routes: list[MissionMapRoute] = Field(default_factory=list)
     assignments: list[MissionMapAssignment] = Field(default_factory=list)
@@ -536,6 +569,59 @@ def _final_map_state(state: MissionMapState, timestamp: datetime) -> MissionMapS
     return state.model_copy(
         update={"is_final": True, "revision": state.revision + 1, "updated_at": timestamp}
     )
+
+
+def _usable_projection(state: MissionMapState, category: str) -> bool:
+    """Return whether one required category has display-ready persisted facts."""
+    if state.availability.model_dump().get(category) != "available":
+        return False
+    if category == "locations":
+        return bool(state.locations)
+    if category == "routes":
+        return bool(state.routes)
+    if category == "assignments":
+        return bool(state.assignments)
+    if category == "metrics":
+        return bool(state.metrics)
+    if category == "validation":
+        return isinstance(state.validation, dict) and state.validation.get("feasible") is not None
+    return False
+
+
+def _final_map_state_with_requirements(
+    state: MissionMapState,
+    requirements: OperationalDataRequirements,
+    timestamp: datetime,
+) -> MissionMapState:
+    """Validate publication evidence and persist deliberate, safe category skips."""
+    missing = [
+        category
+        for category in ("locations", "routes", "assignments", "metrics", "validation")
+        if getattr(requirements, category).status == "required"
+        and not _usable_projection(state, category)
+    ]
+    if missing:
+        labels = ", ".join(missing)
+        raise MissionError(
+            "OPERATIONAL_DATA_INCOMPLETE",
+            f"The plan cannot be published until usable {labels} data is recorded.",
+            409,
+        )
+
+    availability = state.availability.model_copy(deep=True)
+    reasons = dict(state.availability_reasons)
+    for category in ("locations", "routes"):
+        requirement = getattr(requirements, category)
+        if requirement.status == "not_applicable":
+            setattr(availability, category, "not_applicable")
+            reasons[category] = requirement.reason.strip()  # validated above
+        else:
+            reasons.pop(category, None)
+
+    prepared = state.model_copy(
+        update={"availability": availability, "availability_reasons": reasons}
+    )
+    return _final_map_state(prepared, timestamp)
 
 
 class MissionStore(Protocol):
@@ -1305,6 +1391,7 @@ class MissionService:
         mission_name: str,
         summary: str,
         plan: dict[str, Any],
+        operational_data_requirements: OperationalDataRequirements,
     ) -> MissionRecord:
         """Save the manager's final named plan and complete the Mission."""
         await self.load_for_tool(workspace_id, mission_id, session_id)
@@ -1316,7 +1403,9 @@ class MissionService:
             )
         timestamp = _now()
         current = await self.require_mission(workspace_id, mission_id)
-        map_state = _final_map_state(self._map_state_for(current), timestamp)
+        map_state = _final_map_state_with_requirements(
+            self._map_state_for(current), operational_data_requirements, timestamp
+        )
         return await self.store.transition_mission(
             workspace_id,
             mission_id,
@@ -1336,7 +1425,13 @@ class MissionService:
                 "plan_published",
                 agent="mission_manager",
                 tool="publish_plan",
-                payload={"mission_name": mission_name, "summary": summary},
+                payload={
+                    "mission_name": mission_name,
+                    "summary": summary,
+                    "operational_data_requirements": operational_data_requirements.model_dump(
+                        mode="python"
+                    ),
+                },
                 created_at=timestamp,
             ),
         )
@@ -1754,6 +1849,8 @@ __all__ = [
     "MissionListResponse",
     "MissionRecord",
     "MissionService",
+    "OperationalDataRequirement",
+    "OperationalDataRequirements",
     "WorkspaceCreate",
     "WorkspaceListResponse",
     "WorkspaceMapMissionSummary",

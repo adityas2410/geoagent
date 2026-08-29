@@ -28,4 +28,20 @@ describe("workspace management API client", () => {
     expect(init?.method).toBe("DELETE");
     expect(init?.body).toBe(JSON.stringify({ workspace_name: "Operations" }));
   });
+
+  it("sends a workspace question with browser-provided history", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ answer: "One Mission is running.", references: [] }), { status: 200 }),
+    );
+
+    await api.askWorkspace("ws_1", "What is running?", [{ role: "user", content: "Earlier question" }]);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toContain("/api/workspaces/ws_1/questions");
+    expect(init?.method).toBe("POST");
+    expect(init?.body).toBe(JSON.stringify({
+      question: "What is running?",
+      history: [{ role: "user", content: "Earlier question" }],
+    }));
+  });
 });

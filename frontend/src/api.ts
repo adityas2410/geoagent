@@ -5,6 +5,8 @@ import type {
   MissionMapResponse,
   Workspace,
   WorkspaceMapMissionSummary,
+  WorkspaceQuestionAnswer,
+  WorkspaceQuestionHistoryMessage,
 } from "./types";
 
 const baseUrl = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(
@@ -73,6 +75,11 @@ export const api = {
   },
   missions: (workspaceId: string) =>
     request<{ missions: Mission[] }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/missions`),
+  askWorkspace: (workspaceId: string, question: string, history: WorkspaceQuestionHistoryMessage[]) =>
+    request<WorkspaceQuestionAnswer>(`/api/workspaces/${encodeURIComponent(workspaceId)}/questions`, {
+      method: "POST",
+      body: JSON.stringify({ question, history }),
+    }),
   mission: (workspaceId: string, missionId: string) => request<Mission>(missionPath(workspaceId, missionId)),
   events: (workspaceId: string, missionId: string) =>
     request<{ events: MissionEvent[] }>(`${missionPath(workspaceId, missionId)}/events`),

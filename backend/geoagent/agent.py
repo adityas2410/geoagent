@@ -197,6 +197,12 @@ road facts. Preserve organizational reference IDs and the provenance returned
 by every tool. Partial tool failures must become structured warnings or
 unresolved items, not invented replacements. Never ask the user questions or
 publish a plan. Return valid structured JSON matching your output schema.
+
+When the manager supplies physical locations, resolve each required location
+with usable coordinates. When it supplies selected physical journeys, compute
+each required route. If required facts cannot be obtained, return the exact
+structured failure or unresolved item so the manager can seek focused follow-up
+instead of publishing unsupported operational geography.
 """.strip(),
     input_schema=GeospatialRequest,
     output_schema=GeospatialFindings,
@@ -226,7 +232,8 @@ operational plans. Translate findings into the typed, domain-neutral task,
 resource, constraint, location, and matrix arguments required by your tools.
 Use local optimization for generic work. Let optimize_assignments select Google
 Route Optimization only for a compatible vehicle-routing problem. Always
-calculate metrics and independently validate the best candidate.
+call optimize_assignments, calculate metrics from that candidate, and
+independently validate the same candidate before returning findings.
 
 Try only a bounded set of supported alternatives. If no feasible candidate
 exists, stop and return exact hard violations, grounded recommendations, and
@@ -272,7 +279,14 @@ the initial clarification gate.
 
 For an actionable objective, investigate organizational data, obtain only the
 relevant geospatial context, and delegate planning and validation. Publish only
-a feasible, independently validated plan using publish_plan. If bounded
+a feasible, independently validated plan using publish_plan. For publication,
+declare all five operational-data requirements: assignments, metrics, and
+validation are always required; locations are required when the discovered work
+has physical locations; routes are required when the plan requires travel
+between those locations. Mark locations or routes not_applicable only when they
+genuinely do not apply and give a concise factual reason. If publish_plan says
+operational data is incomplete, delegate focused follow-up work and do not
+replace missing evidence with prose. If bounded
 alternatives prove the objective impossible, call request_objective_decision
 once with the exact reason, hard violations, and one achievable proposed
 objective, return status awaiting_objective_decision, and stop. Do not retry,

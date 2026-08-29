@@ -144,3 +144,19 @@ export interface WorkspaceMapMissionSummary {
   is_final: boolean;
   locations: MapLocation[];
 }
+
+export interface WorkspaceQuestionHistoryMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface WorkspaceQuestionReference {
+  mission_id: string;
+  mission_name?: string | null;
+  event_ids: string[];
+}
+
+export interface WorkspaceQuestionAnswer {
+  answer: string;
+  references: WorkspaceQuestionReference[];
+}

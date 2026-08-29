@@ -37,11 +37,11 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 # Ordered native-Gemini model chain used by all four agents. Every configured
 # model satisfies the hackathon's Gemini 3.5+ requirement.
-PRIMARY_MODEL = os.getenv("GEOAGENT_PRIMARY_MODEL", "gemini-3.7-flash")
+PRIMARY_MODEL = os.getenv("GEOAGENT_PRIMARY_MODEL", "gemini-3.6-flash")
 FALLBACK_MODELS = tuple(
     model.strip()
     for model in os.getenv(
-        "GEOAGENT_FALLBACK_MODELS", "gemini-3.6-flash,gemini-3.5-flash"
+        "GEOAGENT_FALLBACK_MODELS", "gemini-3.5-flash"
     ).split(",")
     if model.strip()
 )

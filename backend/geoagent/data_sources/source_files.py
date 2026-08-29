@@ -159,7 +159,7 @@ class GcsSourceStorage:
         del workspace_id, source_id
         try:
             self.bucket.blob(storage_key).delete(if_generation_match=int(generation))
-        except Exception:
-            # This is compensating cleanup after a failed connection. The
-            # original registration error remains the actionable failure.
-            return
+        except Exception as error:
+            raise DataSourceError(
+                "SOURCE_STORAGE_FAILED", "The source file could not be removed.", 503
+            ) from error

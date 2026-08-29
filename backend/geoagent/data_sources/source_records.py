@@ -15,6 +15,8 @@ class SourceRepository(Protocol):
 
     def list(self, workspace_id: str) -> list[DataSourceRecord]: ...
 
+    def delete(self, workspace_id: str, source_id: str) -> None: ...
+
 
 class InMemorySourceRepository:
     """Small deterministic repository used by unit tests."""
@@ -40,6 +42,9 @@ class InMemorySourceRepository:
             ),
             key=lambda record: record.created_at,
         )
+
+    def delete(self, workspace_id: str, source_id: str) -> None:
+        self.records.pop((workspace_id, source_id), None)
 
 
 class FirestoreSourceRepository:
@@ -98,3 +103,11 @@ class FirestoreSourceRepository:
                 "SOURCE_UNAVAILABLE", "Source metadata could not be listed.", 503
             ) from error
         return sorted(records, key=lambda record: record.created_at)
+
+    def delete(self, workspace_id: str, source_id: str) -> None:
+        try:
+            self._collection(workspace_id).document(source_id).delete()
+        except Exception as error:
+            raise DataSourceError(
+                "SOURCE_REGISTRATION_FAILED", "The source connection could not be removed.", 503
+            ) from error

@@ -114,12 +114,17 @@ class DataSourceService:
         try:
             self.repository.create(record)
         except Exception:
-            self.storage.delete(
-                workspace_id,
-                source_id,
-                stored_object.storage_key,
-                stored_object.generation,
-            )
+            try:
+                self.storage.delete(
+                    workspace_id,
+                    source_id,
+                    stored_object.storage_key,
+                    stored_object.generation,
+                )
+            except Exception:
+                # The source-registration failure remains the user-actionable
+                # error; a later workspace cleanup can retry object removal.
+                pass
             raise
         return record
 
@@ -133,6 +138,27 @@ class DataSourceService:
         if record is None:
             raise DataSourceError("SOURCE_NOT_FOUND", "The source was not found.", 404)
         return record
+
+    def delete_stored_source(self, record: DataSourceRecord) -> None:
+        """Delete a source object while leaving metadata available for a safe retry."""
+        try:
+            self.storage.delete(
+                record.workspace_id,
+                record.source_id,
+                record.storage_key,
+                record.storage_generation,
+            )
+        except DataSourceError:
+            raise
+        except Exception as error:
+            raise DataSourceError(
+                "SOURCE_STORAGE_FAILED", "The source file could not be removed.", 503
+            ) from error
+
+    def delete_source(self, record: DataSourceRecord) -> None:
+        """Permanently remove one disconnected source and its metadata."""
+        self.delete_stored_source(record)
+        self.repository.delete(record.workspace_id, record.source_id)
 
     def list_authorized(
         self, workspace_id: str, authorized_source_ids: set[str]

@@ -35,6 +35,7 @@ from .missions import MissionMapResponse
 from .missions import MissionRecord
 from .missions import MissionService
 from .missions import WorkspaceCreate
+from .missions import WorkspaceDelete
 from .missions import WorkspaceListResponse
 from .missions import WorkspaceMapResponse
 from .missions import WorkspaceRecord
@@ -129,6 +130,20 @@ async def list_workspaces(
         return {"workspaces": await service.list_workspaces()}
     except MissionError as error:
         raise_mission_http_error(error)
+
+
+@app.delete("/api/workspaces/{workspace_id}", status_code=204)
+async def delete_workspace(
+    workspace_id: str,
+    request: WorkspaceDelete,
+    service: MissionService = Depends(mission_service_dependency),
+) -> Response:
+    """Permanently delete a confirmed Workspace and all of its product data."""
+    try:
+        await service.delete_workspace(workspace_id, request.workspace_name)
+    except MissionError as error:
+        raise_mission_http_error(error)
+    return Response(status_code=204)
 
 
 @app.post(
@@ -251,6 +266,22 @@ async def get_mission(
         return await service.require_mission(workspace_id, mission_id)
     except MissionError as error:
         raise_mission_http_error(error)
+
+
+@app.delete(
+    "/api/workspaces/{workspace_id}/missions/{mission_id}", status_code=204
+)
+async def delete_mission(
+    workspace_id: str,
+    mission_id: str,
+    service: MissionService = Depends(mission_service_dependency),
+) -> Response:
+    """Permanently delete a non-running Mission and its safe activity history."""
+    try:
+        await service.delete_mission(workspace_id, mission_id)
+    except MissionError as error:
+        raise_mission_http_error(error)
+    return Response(status_code=204)
 
 
 @app.get(

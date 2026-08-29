@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import logging
+import os
 from functools import cached_property
 from typing import AsyncGenerator
 
@@ -20,6 +22,7 @@ from pydantic import model_validator
 logger = logging.getLogger("geoagent.model_fallback")
 
 TRANSIENT_MODEL_ERROR_CODES = frozenset({404, 429, 500, 502, 503, 504})
+DEFAULT_MODEL_TIMEOUT_SECONDS = 25
 
 
 def _copy_request_for_model(llm_request: LlmRequest) -> LlmRequest:
@@ -39,6 +42,12 @@ class FallbackGemini(BaseLlm):
     fallback_models: tuple[str, ...] = Field(default_factory=tuple)
     retry_options: types.HttpRetryOptions = Field(
         default_factory=lambda: types.HttpRetryOptions(attempts=1)
+    )
+    request_timeout_seconds: int = Field(
+        default_factory=lambda: int(
+            os.getenv("GEOAGENT_MODEL_TIMEOUT_SECONDS", DEFAULT_MODEL_TIMEOUT_SECONDS)
+        ),
+        gt=0,
     )
 
     @model_validator(mode="after")
@@ -78,11 +87,12 @@ class FallbackGemini(BaseLlm):
             candidate_request.model = delegate.model
             emitted_response = False
             try:
-                async for response in delegate.generate_content_async(
-                    candidate_request, stream=stream
-                ):
-                    emitted_response = True
-                    yield response
+                async with asyncio.timeout(self.request_timeout_seconds):
+                    async for response in delegate.generate_content_async(
+                        candidate_request, stream=stream
+                    ):
+                        emitted_response = True
+                        yield response
                 if index:
                     logger.warning(
                         "Gemini fallback succeeded primary=%s selected=%s",
@@ -90,11 +100,14 @@ class FallbackGemini(BaseLlm):
                         delegate.model,
                     )
                 return
-            except APIError as error:
+            except (APIError, TimeoutError) as error:
                 has_fallback = index + 1 < len(self.delegates)
+                status_code = (
+                    error.code if isinstance(error, APIError) else 504
+                )
                 if (
                     emitted_response
-                    or error.code not in TRANSIENT_MODEL_ERROR_CODES
+                    or status_code not in TRANSIENT_MODEL_ERROR_CODES
                     or not has_fallback
                 ):
                     raise
@@ -102,6 +115,6 @@ class FallbackGemini(BaseLlm):
                 logger.warning(
                     "Gemini model unavailable model=%s status=%s fallback=%s",
                     delegate.model,
-                    error.code,
+                    status_code,
                     next_model,
                 )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -47,6 +48,31 @@ class StubGemini:
 
 
 class FallbackGeminiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_timeout_uses_next_model(self) -> None:
+        class StalledGemini(StubGemini):
+            async def generate_content_async(self, request, stream=False):
+                self.calls.append(request.model)
+                await asyncio.sleep(1)
+                yield LlmResponse(partial=False)
+
+        calls: list[str] = []
+        model = FallbackGemini(
+            model="gemini-3.7-flash",
+            fallback_models=("gemini-3.6-flash",),
+            request_timeout_seconds=1,
+        )
+        model.__dict__["delegates"] = (
+            StalledGemini("gemini-3.7-flash", calls),
+            StubGemini("gemini-3.6-flash", calls),
+        )
+
+        responses = [
+            response async for response in model.generate_content_async(LlmRequest())
+        ]
+
+        self.assertEqual(calls, ["gemini-3.7-flash", "gemini-3.6-flash"])
+        self.assertEqual(len(responses), 1)
+
     async def test_prepares_all_request_copies_before_primary_mutates_tools(self) -> None:
         class SharedToolState:
             locked = False

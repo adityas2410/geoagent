@@ -1083,8 +1083,10 @@ class MissionApiTest(unittest.TestCase):
             f"/api/workspaces/{workspace_id}/missions/{mission['mission_id']}"
         )
         self.assertEqual(deleted_mission.status_code, 204, deleted_mission.text)
-        deleted_workspace = self.client.delete(
-            f"/api/workspaces/{workspace_id}", json={"workspace_name": "Delete API"}
+        deleted_workspace = self.client.request(
+            "DELETE",
+            f"/api/workspaces/{workspace_id}",
+            json={"workspace_name": "Delete API"},
         )
         self.assertEqual(deleted_workspace.status_code, 204, deleted_workspace.text)
 

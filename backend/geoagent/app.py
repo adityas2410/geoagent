@@ -40,6 +40,10 @@ from .missions import WorkspaceListResponse
 from .missions import WorkspaceMapResponse
 from .missions import WorkspaceRecord
 from .missions import get_mission_service
+from .workspace_qa import WorkspaceQuestionAnswer
+from .workspace_qa import WorkspaceQuestionRequest
+from .workspace_qa import WorkspaceQuestionService
+from .workspace_qa import get_workspace_question_service
 
 
 app = FastAPI(title="GeoAgent API", version="0.1.0")
@@ -85,6 +89,11 @@ def data_source_service_dependency() -> DataSourceService:
 def mission_service_dependency() -> MissionService:
     """Provide the shared Workspace and Mission service to API endpoints."""
     return get_mission_service()
+
+
+def workspace_question_service_dependency() -> WorkspaceQuestionService:
+    """Provide the stateless workspace Q&A service."""
+    return get_workspace_question_service()
 
 
 def raise_http_error(error: DataSourceError) -> None:
@@ -248,6 +257,24 @@ async def list_missions(
     """Return every Mission belonging to one Workspace."""
     try:
         return {"missions": await service.list_missions(workspace_id)}
+    except MissionError as error:
+        raise_mission_http_error(error)
+
+
+@app.post(
+    "/api/workspaces/{workspace_id}/questions",
+    response_model=WorkspaceQuestionAnswer,
+)
+async def ask_workspace_question(
+    workspace_id: str,
+    request: WorkspaceQuestionRequest,
+    response: Response,
+    service: WorkspaceQuestionService = Depends(workspace_question_service_dependency),
+) -> WorkspaceQuestionAnswer:
+    """Answer one read-only question without retaining its conversation."""
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await service.answer(workspace_id, request)
     except MissionError as error:
         raise_mission_http_error(error)
 

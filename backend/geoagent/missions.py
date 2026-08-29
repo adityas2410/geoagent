@@ -118,12 +118,18 @@ class WorkspaceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
 
 
+class WorkspaceDelete(BaseModel):
+    """Exact-name confirmation required before destructive Workspace cleanup."""
+
+    workspace_name: str = Field(min_length=1, max_length=100)
+
+
 class WorkspaceRecord(BaseModel):
     """Workspace information saved in Firestore and returned by the API."""
 
     workspace_id: str
     name: str
-    status: Literal["active"] = "active"
+    status: Literal["active", "deleting", "deletion_failed"] = "active"
     created_at: datetime
     updated_at: datetime
 
@@ -547,6 +553,16 @@ class MissionStore(Protocol):
         """Load all Workspaces."""
         ...
 
+    async def set_workspace_status(
+        self, workspace_id: str, allowed_statuses: set[str], status: str, updated_at: datetime
+    ) -> WorkspaceRecord:
+        """Guard a Workspace lifecycle transition."""
+        ...
+
+    async def delete_workspace(self, workspace_id: str) -> None:
+        """Delete a Workspace and all product subcollections."""
+        ...
+
     async def create_mission(
         self, mission: MissionRecord, event: MissionEventRecord
     ) -> None:
@@ -563,7 +579,9 @@ class MissionStore(Protocol):
         """Load all Missions from one Workspace."""
         ...
 
-    async def delete_mission(self, workspace_id: str, mission_id: str) -> None:
+    async def delete_mission(
+        self, workspace_id: str, mission_id: str, allowed_statuses: set[str]
+    ) -> None:
         """Permanently delete one Mission and its subcollections."""
         ...
 
@@ -647,6 +665,36 @@ class FirestoreMissionStore:
         ).get()
         return [WorkspaceRecord.model_validate(item.to_dict()) for item in snapshots]
 
+    async def set_workspace_status(
+        self, workspace_id: str, allowed_statuses: set[str], status: str, updated_at: datetime
+    ) -> WorkspaceRecord:
+        from google.cloud import firestore
+
+        workspace_ref = self._workspace_ref(workspace_id)
+
+        @firestore.async_transactional
+        async def update(transaction):
+            snapshot = await workspace_ref.get(transaction=transaction)
+            if not snapshot.exists:
+                raise MissionError("WORKSPACE_NOT_FOUND", "The Workspace was not found.", 404)
+            current = WorkspaceRecord.model_validate(snapshot.to_dict())
+            if current.status not in allowed_statuses:
+                raise MissionError(
+                    "INVALID_WORKSPACE_STATUS",
+                    "The Workspace cannot perform this action right now.",
+                    409,
+                )
+            transaction.update(workspace_ref, {"status": status, "updated_at": updated_at})
+            return WorkspaceRecord.model_validate(
+                {**current.model_dump(mode="python"), "status": status, "updated_at": updated_at}
+            )
+
+        return await update(self.client.transaction())
+
+    async def delete_workspace(self, workspace_id: str) -> None:
+        """Delete the Workspace, Missions, events, and source metadata recursively."""
+        await self.client.recursive_delete(self._workspace_ref(workspace_id))
+
     async def create_mission(
         self, mission: MissionRecord, event: MissionEventRecord
     ) -> None:
@@ -681,8 +729,19 @@ class FirestoreMissionStore:
         )
         return [MissionRecord.model_validate(item.to_dict()) for item in snapshots]
 
-    async def delete_mission(self, workspace_id: str, mission_id: str) -> None:
+    async def delete_mission(
+        self, workspace_id: str, mission_id: str, allowed_statuses: set[str]
+    ) -> None:
         """Delete the Mission document and all event subcollection documents."""
+        mission = await self.get_mission(workspace_id, mission_id)
+        if mission is None:
+            raise MissionError("MISSION_NOT_FOUND", "The Mission was not found.", 404)
+        if mission.status not in allowed_statuses:
+            raise MissionError(
+                "MISSION_RUNNING",
+                "A running Mission cannot be deleted. Wait until it pauses or finishes.",
+                409,
+            )
         await self.client.recursive_delete(self._mission_ref(workspace_id, mission_id))
 
     async def transition_mission(
@@ -845,6 +904,12 @@ class MissionService:
             ) from error
         if workspace is None:
             raise MissionError("WORKSPACE_NOT_FOUND", "The Workspace was not found.", 404)
+        if workspace.status != "active":
+            raise MissionError(
+                "WORKSPACE_UNAVAILABLE",
+                "The Workspace is being deleted or needs deletion cleanup before it can be used.",
+                409,
+            )
         return workspace
 
     async def list_workspaces(self) -> list[WorkspaceRecord]:
@@ -854,6 +919,103 @@ class MissionService:
         except Exception as error:
             raise MissionError(
                 "WORKSPACE_UNAVAILABLE", "Workspaces could not be listed.", 503
+            ) from error
+
+    async def delete_mission(self, workspace_id: str, mission_id: str) -> None:
+        """Permanently delete one non-running Mission and its internal session."""
+        mission = await self.require_mission(workspace_id, mission_id)
+        if mission.status == "running":
+            raise MissionError(
+                "MISSION_RUNNING",
+                "A running Mission cannot be deleted. Wait until it pauses or finishes.",
+                409,
+            )
+        await self._delete_session(workspace_id, mission.adk_session_id)
+        try:
+            await self.store.delete_mission(
+                workspace_id,
+                mission_id,
+                {"created", "awaiting_input", "awaiting_objective_decision", "completed", "failed"},
+            )
+        except MissionError:
+            raise
+        except Exception as error:
+            raise MissionError(
+                "MISSION_UNAVAILABLE", "The Mission could not be deleted.", 503
+            ) from error
+
+    async def delete_workspace(self, workspace_id: str, confirmation_name: str) -> None:
+        """Remove a Workspace only after all external source/session cleanup succeeds."""
+        try:
+            workspace = await self.store.get_workspace(workspace_id)
+        except Exception as error:
+            raise MissionError(
+                "WORKSPACE_UNAVAILABLE", "The Workspace could not be loaded.", 503
+            ) from error
+        if workspace is None:
+            raise MissionError("WORKSPACE_NOT_FOUND", "The Workspace was not found.", 404)
+        if workspace.status not in {"active", "deletion_failed"}:
+            raise MissionError(
+                "INVALID_WORKSPACE_STATUS",
+                "The Workspace is already being deleted.",
+                409,
+            )
+        if confirmation_name != workspace.name:
+            raise MissionError(
+                "WORKSPACE_CONFIRMATION_MISMATCH",
+                "Enter the exact Workspace name to confirm deletion.",
+                400,
+            )
+        try:
+            missions = await self.store.list_missions(workspace_id)
+        except Exception as error:
+            raise MissionError(
+                "WORKSPACE_UNAVAILABLE", "The Workspace could not be prepared for deletion.", 503
+            ) from error
+        if any(mission.status == "running" for mission in missions):
+            raise MissionError(
+                "WORKSPACE_HAS_RUNNING_MISSIONS",
+                "Stop or wait for every running Mission before deleting this Workspace.",
+                409,
+            )
+        timestamp = _now()
+        try:
+            await self.store.set_workspace_status(
+                workspace_id, {"active", "deletion_failed"}, "deleting", timestamp
+            )
+            sources = await asyncio.to_thread(self.data_source_service.list_sources, workspace_id)
+            for source in sources:
+                await asyncio.to_thread(self.data_source_service.delete_stored_source, source)
+            for mission in missions:
+                await self._delete_session(workspace_id, mission.adk_session_id)
+            await self.store.delete_workspace(workspace_id)
+        except MissionError:
+            await self._mark_workspace_deletion_failed(workspace_id)
+            raise
+        except Exception as error:
+            await self._mark_workspace_deletion_failed(workspace_id)
+            raise MissionError(
+                "WORKSPACE_UNAVAILABLE", "The Workspace could not be fully deleted. Try again.", 503
+            ) from error
+
+    async def _mark_workspace_deletion_failed(self, workspace_id: str) -> None:
+        """Leave a failed cleanup locked to normal use but available for a retry."""
+        try:
+            await self.store.set_workspace_status(
+                workspace_id, {"deleting"}, "deletion_failed", _now()
+            )
+        except Exception:
+            pass
+
+    async def _delete_session(self, workspace_id: str, session_id: str) -> None:
+        """Delete an internal ADK session or keep its product record for retry."""
+        try:
+            await self.session_service.delete_session(
+                app_name=APP_NAME, user_id=workspace_id, session_id=session_id
+            )
+        except Exception as error:
+            raise MissionError(
+                "MISSION_UNAVAILABLE", "The Mission session could not be removed.", 503
             ) from error
 
     async def create_mission(
@@ -1304,13 +1466,7 @@ class MissionService:
                 "Only a Mission awaiting an objective decision can be discarded.",
                 409,
             )
-        try:
-            await self.store.delete_mission(workspace_id, mission_id)
-        except Exception as error:
-            raise MissionError(
-                "MISSION_UNAVAILABLE", "The Mission could not be discarded.", 503
-            ) from error
-        await self._delete_session_quietly(workspace_id, mission.adk_session_id)
+        await self.delete_mission(workspace_id, mission_id)
 
     async def _run_agent(self, mission: MissionRecord, message: str) -> MissionRecord:
         """Run the manager until it completes, pauses, or fails."""

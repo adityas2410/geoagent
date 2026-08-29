@@ -56,6 +56,24 @@ class InMemoryMissionStore:
             key=lambda item: item.created_at,
         )
 
+    async def set_workspace_status(
+        self, workspace_id: str, allowed_statuses: set[str], status: str, updated_at: datetime
+    ) -> WorkspaceRecord:
+        current = self.workspaces.get(workspace_id)
+        if current is None:
+            raise MissionError("WORKSPACE_NOT_FOUND", "The Workspace was not found.", 404)
+        if current.status not in allowed_statuses:
+            raise MissionError("INVALID_WORKSPACE_STATUS", "The Workspace cannot perform this action right now.", 409)
+        updated = current.model_copy(update={"status": status, "updated_at": updated_at})
+        self.workspaces[workspace_id] = updated
+        return updated.model_copy(deep=True)
+
+    async def delete_workspace(self, workspace_id: str) -> None:
+        self.workspaces.pop(workspace_id, None)
+        for key in [key for key in self.missions if key[0] == workspace_id]:
+            self.missions.pop(key, None)
+            self.events.pop(key, None)
+
     async def create_mission(
         self, mission: MissionRecord, event: MissionEventRecord
     ) -> None:
@@ -79,8 +97,15 @@ class InMemoryMissionStore:
             key=lambda item: item.created_at,
         )
 
-    async def delete_mission(self, workspace_id: str, mission_id: str) -> None:
+    async def delete_mission(
+        self, workspace_id: str, mission_id: str, allowed_statuses: set[str]
+    ) -> None:
         key = (workspace_id, mission_id)
+        mission = self.missions.get(key)
+        if mission is None:
+            raise MissionError("MISSION_NOT_FOUND", "The Mission was not found.", 404)
+        if mission.status not in allowed_statuses:
+            raise MissionError("MISSION_RUNNING", "A running Mission cannot be deleted. Wait until it pauses or finishes.", 409)
         self.missions.pop(key, None)
         self.events.pop(key, None)
 
@@ -767,6 +792,58 @@ class MissionServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(session)
 
+    async def test_delete_non_running_mission_removes_product_and_session_state(self) -> None:
+        data_service, service, sessions = build_services(self.root / "delete-mission")
+        workspace = await service.create_workspace(WorkspaceCreate(name="Delete Mission"))
+        data_service.connect_sqlite(workspace.workspace_id, "Operations", self.database_path, "operations.db")
+        mission = await service.create_mission(
+            workspace.workspace_id, MissionCreate(objective="Review operational work.")
+        )
+
+        await service.delete_mission(workspace.workspace_id, mission.mission_id)
+
+        with self.assertRaises(MissionError) as raised:
+            await service.require_mission(workspace.workspace_id, mission.mission_id)
+        self.assertEqual(raised.exception.code, "MISSION_NOT_FOUND")
+        self.assertIsNone(await sessions.get_session(app_name=APP_NAME, user_id=workspace.workspace_id, session_id=mission.mission_id))
+
+    async def test_running_mission_and_workspace_cannot_be_deleted(self) -> None:
+        data_service, service, _sessions = build_services(self.root / "running-delete")
+        workspace = await service.create_workspace(WorkspaceCreate(name="Running Delete"))
+        data_service.connect_sqlite(workspace.workspace_id, "Operations", self.database_path, "operations.db")
+        mission = await service.create_mission(
+            workspace.workspace_id, MissionCreate(objective="Review operational work.")
+        )
+        service.store.missions[(workspace.workspace_id, mission.mission_id)] = mission.model_copy(update={"status": "running"})
+
+        with self.assertRaises(MissionError) as mission_error:
+            await service.delete_mission(workspace.workspace_id, mission.mission_id)
+        self.assertEqual(mission_error.exception.code, "MISSION_RUNNING")
+        with self.assertRaises(MissionError) as workspace_error:
+            await service.delete_workspace(workspace.workspace_id, workspace.name)
+        self.assertEqual(workspace_error.exception.code, "WORKSPACE_HAS_RUNNING_MISSIONS")
+
+    async def test_delete_workspace_removes_sources_missions_and_sessions(self) -> None:
+        data_service, service, sessions = build_services(self.root / "delete-workspace")
+        workspace = await service.create_workspace(WorkspaceCreate(name="Delete Workspace"))
+        source = data_service.connect_sqlite(
+            workspace.workspace_id, "Operations", self.database_path, "operations.db"
+        )
+        mission = await service.create_mission(
+            workspace.workspace_id, MissionCreate(objective="Review operational work.")
+        )
+
+        with self.assertRaises(MissionError) as confirmation_error:
+            await service.delete_workspace(workspace.workspace_id, "wrong name")
+        self.assertEqual(confirmation_error.exception.code, "WORKSPACE_CONFIRMATION_MISMATCH")
+        await service.delete_workspace(workspace.workspace_id, workspace.name)
+
+        with self.assertRaises(MissionError) as workspace_error:
+            await service.require_workspace(workspace.workspace_id)
+        self.assertEqual(workspace_error.exception.code, "WORKSPACE_NOT_FOUND")
+        self.assertFalse((data_service.storage.root_directory / source.storage_key).exists())
+        self.assertIsNone(await sessions.get_session(app_name=APP_NAME, user_id=workspace.workspace_id, session_id=mission.mission_id))
+
 
 class MissionApiTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -869,6 +946,30 @@ class MissionApiTest(unittest.TestCase):
             response.headers.get("access-control-allow-origin"),
             "http://localhost:5173",
         )
+
+    def test_delete_mission_and_workspace_endpoints(self) -> None:
+        workspace = self.client.post(
+            "/api/workspaces", json={"name": "Delete API"}
+        ).json()
+        workspace_id = workspace["workspace_id"]
+        upload = self.client.post(
+            f"/api/workspaces/{workspace_id}/data-sources/sqlite",
+            data={"name": "Operations"},
+            files={"file": ("operations.db", self.database_path.read_bytes(), "application/vnd.sqlite3")},
+        )
+        self.assertEqual(upload.status_code, 201, upload.text)
+        mission = self.client.post(
+            f"/api/workspaces/{workspace_id}/missions", json={"objective": "Review operational work."}
+        ).json()
+
+        deleted_mission = self.client.delete(
+            f"/api/workspaces/{workspace_id}/missions/{mission['mission_id']}"
+        )
+        self.assertEqual(deleted_mission.status_code, 204, deleted_mission.text)
+        deleted_workspace = self.client.delete(
+            f"/api/workspaces/{workspace_id}", json={"workspace_name": "Delete API"}
+        )
+        self.assertEqual(deleted_workspace.status_code, 204, deleted_workspace.text)
 
     def test_objective_accept_and_discard_endpoints(self) -> None:
         runner = ObjectiveDecisionRunner(feasible_after_acceptance=True)

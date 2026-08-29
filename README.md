@@ -131,6 +131,30 @@ DELETE /api/workspaces/{workspace_id}/missions/{mission_id}/objective-decision
 
 A completed Mission stores its plan and frontend-safe events in Firestore.
 
+### Ask GeoAgent workspace Q&A
+
+The floating **Ask GeoAgent** widget uses one read-only ADK Master Operations
+Agent to answer questions across the current Workspace's persisted Missions.
+It can compare lifecycle status, objectives, plans, assignments, metrics,
+validation, warnings, failures, and safe recorded agent activity. It cannot
+query connected organizational sources or create, modify, delete, resume, or
+rerun a Mission.
+
+```text
+POST /api/workspaces/{workspace_id}/questions
+  -> receives one question plus bounded browser-memory history
+  -> creates one temporary in-memory ADK session
+  -> reads current Mission documents and safe Mission events
+  -> returns an answer with validated Mission/event references
+  -> deletes the temporary session before returning
+```
+
+Chat messages remain only in React memory. Minimizing the widget preserves the
+visible conversation, while a Workspace switch or browser refresh clears it.
+The backend does not create a chatbot collection or persistent ADK session,
+returns `Cache-Control: no-store`, and disables GenAI message-content capture
+in telemetry.
+
 ### Live map projection
 
 Each Mission also stores a compact, frontend-ready `map_state`. It is a
@@ -214,6 +238,7 @@ rule. Several files naturally participate in the same request.
 | `backend/geoagent/missions.py` | Core Mission lifecycle: Firestore records/events, ADK sessions/runs, state transitions, clarification resume, objective decisions, and plan persistence. |
 | `backend/geoagent/agent.py` | Defines the Manager and three specialist agents, their instructions, schemas, and automatic ADK subagent delegation. |
 | `backend/geoagent/mission_manager_tools.py` | The four Manager-only actions: load Mission state, ask the one clarification, request an objective decision, and publish a plan. |
+| `backend/geoagent/workspace_qa.py` | Defines the read-only Master Operations Agent, its Workspace-bound tools, bounded request/response schemas, and ephemeral per-request ADK runner. |
 | `backend/geoagent/geospatial_tools.py` | Geospatial Agent integrations for Google Maps, Weather, and Roads APIs; normalizes results, provenance, partial failures, and API errors. |
 | `backend/geoagent/planning_tools.py` | Planning Agent's domain-neutral optimization, metrics, and validation. Uses local OR-Tools and optionally Route Optimization. |
 | `backend/geoagent/data_sources/organizational_data_tools.py` | Organizational Data Agent's authorised source listing, schema inspection, and read-only querying tools. |
@@ -285,6 +310,13 @@ That action stores the one initial open-ended question, places the Mission in
 Mission session. The Mission runner converts ADK activity into safe agent,
 tool, result, and state events without exposing hidden reasoning; event
 recording is infrastructure, not an agent-controlled tool.
+
+The separate **Master Operations Agent** is not a Mission subagent. Each
+question runs in a short-lived in-memory session seeded with the current
+Workspace ID. Its tools can list Mission summaries, load one persisted Mission,
+and load capped safe events for one Mission. Workspace identity comes from ADK
+tool context rather than model arguments, and returned evidence references are
+filtered against records actually retrieved during that invocation.
 
 ## Features
 

@@ -23,7 +23,12 @@ def configure_observability() -> None:
     )
     for logger_name in ("google_adk", "geoagent"):
         configured_logger = logging.getLogger(logger_name)
-        configured_logger.setLevel(level)
+        # ADK DEBUG output includes complete prompts and model responses. Keep
+        # framework logs at INFO or above so ephemeral Q&A content cannot be
+        # copied into local console output or Cloud Run logs.
+        configured_logger.setLevel(
+            max(level, logging.INFO) if logger_name == "google_adk" else level
+        )
         if not configured_logger.handlers:
             configured_logger.addHandler(handler)
         configured_logger.propagate = False
@@ -39,10 +44,11 @@ def configure_observability() -> None:
     os.environ.setdefault(
         "OTEL_SEMCONV_STABILITY_OPT_IN", "gen_ai_latest_experimental"
     )
-    os.environ.setdefault(
-        "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT", "EVENT_ONLY"
-    )
-    os.environ.setdefault("ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS", "false")
+    # Operational telemetry may contain timing and token metadata, but never
+    # persist user prompts, chat transcripts, model answers, or hidden thoughts.
+    os.environ["OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"] = "NO_CONTENT"
+    os.environ["OTEL_INSTRUMENTATION_GENAI_EMIT_EVENT"] = "false"
+    os.environ["ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS"] = "false"
 
     from google.adk.telemetry.google_cloud import get_gcp_exporters
     from google.adk.telemetry.setup import maybe_set_otel_providers

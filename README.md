@@ -79,6 +79,8 @@ Create or open a Workspace
 
 If the user does not select sources, the new Mission is authorized to use all currently connected sources in that Workspace. The backend saves those authorized source IDs with the Mission so later source connections do not silently change an existing Mission.
 
+Workspaces own their sources and Missions. A non-running Mission may be deleted through `DELETE /api/workspaces/{workspace_id}/missions/{mission_id}`. Deleting a Workspace uses `DELETE /api/workspaces/{workspace_id}` with `{"workspace_name":"<exact workspace name>"}` and removes its source files, source metadata, Missions, map state, safe events, and internal ADK sessions. A Workspace with a running Mission cannot be deleted.
+
 Starting a Mission is a planning action, not execution of the real-world operation. The backend deliberately uses two operations:
 
 ```text

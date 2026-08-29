@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { api, GeoAgentApiError } from "./api";
+import { AskGeoAgent } from "./ask-geoagent";
 import {
   describeEvent,
   formatDistance,
@@ -456,6 +457,7 @@ export function App() {
       {newWorkspaceOpen && <NewWorkspaceDialog onClose={() => setNewWorkspaceOpen(false)} onCreate={createWorkspace} />}
       {workspaceSettingsOpen && selectedWorkspace && <WorkspaceSettingsDialog workspace={selectedWorkspace} sources={sources} hasRunningMission={workspaceHasRunningMission} deleting={workspaceDeleting} onClose={() => setWorkspaceSettingsOpen(false)} onConnect={connectSource} onDelete={deleteCurrentWorkspace} />}
       {missionDeleteOpen && selectedMission && <MissionDeleteDialog mission={selectedMission} deleting={missionDeleting} onClose={() => setMissionDeleteOpen(false)} onDelete={deleteSelectedMission} />}
+      <AskGeoAgent workspaceId={workspaceId} workspaceName={selectedWorkspace?.name || null} />
     </main>
   );
 }

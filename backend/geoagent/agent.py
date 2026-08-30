@@ -28,6 +28,8 @@ from .mission_manager_tools import request_clarification
 from .mission_manager_tools import request_objective_decision
 from .model_fallback import FallbackGemini
 from .planning_tools import calculate_plan_metrics
+from .planning_tools import compose_resources
+from .planning_tools import normalize_operational_rules
 from .planning_tools import optimize_assignments
 from .planning_tools import validate_plan
 
@@ -230,6 +232,19 @@ You are the Operational Planning and Validation Agent for one isolated Mission.
 Use the supplied organizational and geospatial findings to construct candidate
 operational plans. Translate findings into the typed, domain-neutral task,
 resource, constraint, location, and matrix arguments required by your tools.
+When organizational findings include source-backed operational rules, first
+call normalize_operational_rules and pass only its returned typed constraints
+to optimization and validation. Do not invent constraint names. When work
+requires an asset and an operator, first call compose_resources to create the
+feasible paired resources. Use exact timestamps returned by authorized source
+data; never fabricate a planning date or a time window.
+For source policies, pass each active rule's code, value, severity, and scope
+to the normalizer. For scoped facilities, pass the facility's actual location
+and loading-service duration. Preserve a task's refrigeration requirement in
+its source facts, and give paired resources the actual asset/operator
+capabilities, availability, home/start location, and shift limit from source
+data. Do not claim a policy is validated unless it was returned by
+validate_plan.
 Use local optimization for generic work. Let optimize_assignments select Google
 Route Optimization only for a compatible vehicle-routing problem. Always
 call optimize_assignments, calculate metrics from that candidate, and
@@ -244,6 +259,8 @@ user. Return valid structured JSON matching your output schema.
     input_schema=PlanningRequest,
     output_schema=PlanningFindings,
     tools=[
+        normalize_operational_rules,
+        compose_resources,
         optimize_assignments,
         calculate_plan_metrics,
         validate_plan,

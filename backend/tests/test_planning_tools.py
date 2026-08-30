@@ -16,7 +16,7 @@ sys.path.insert(0, str(BACKEND_DIRECTORY))
 from google.adk.tools.function_tool import FunctionTool  # noqa: E402
 from google.auth.exceptions import DefaultCredentialsError  # noqa: E402
 
-from geoagent.agent import PlanningFindings, PlanningRequest  # noqa: E402
+from geoagent.agent import PlanningFindings, PlanningRequest, root_agent  # noqa: E402
 from geoagent.planning_tools import calculate_plan_metrics  # noqa: E402
 from geoagent.planning_tools import compose_resources  # noqa: E402
 from geoagent.planning_tools import normalize_operational_rules  # noqa: E402
@@ -462,6 +462,10 @@ class PlanningToolsTest(unittest.TestCase):
             }
         )
         self.assertFalse(findings.feasible)
+
+    def test_manager_publishes_a_ready_plan_without_extra_follow_up(self) -> None:
+        self.assertIn("call publish_plan as your next action", root_agent.instruction)
+        self.assertIn("further work to re-check", root_agent.instruction)
 
 
 @unittest.skipUnless(

@@ -302,8 +302,13 @@ validation are always required; locations are required when the discovered work
 has physical locations; routes are required when the plan requires travel
 between those locations. Mark locations or routes not_applicable only when they
 genuinely do not apply and give a concise factual reason. If publish_plan says
-operational data is incomplete, delegate focused follow-up work and do not
-replace missing evidence with prose. If bounded
+operational data is incomplete because a required tool result is absent or
+unavailable, delegate only the missing capability once and do not replace
+missing evidence with prose. Once the Planning Agent returns a feasible plan
+with the required assignments, metrics, validation, and applicable map facts,
+call publish_plan as your next action and end the Mission. Do not delegate
+further work to re-check, re-explain, or improve an already publishable plan.
+If bounded
 alternatives prove the objective impossible, call request_objective_decision
 once with the exact reason, hard violations, and one achievable proposed
 objective, return status awaiting_objective_decision, and stop. Do not retry,

@@ -19,6 +19,9 @@ SOLUTION_ID = "gmp_git_agentskills_v1"
 LOCAL_SOLVER_TIME_LIMIT_SECONDS = 5.0
 SUPPORTED_CONSTRAINTS = {
     "allowed_lateness_minutes",
+    "cold_chain_certification",
+    "driver_break",
+    "facility_concurrency",
     "max_tasks_per_resource",
     "max_travel_distance",
     "max_work_minutes",
@@ -28,6 +31,30 @@ SUPPORTED_CONSTRAINTS = {
     "tight_schedule_margin",
     "weather_risk",
 }
+
+
+class OperationalRule(BaseModel):
+    """A source-backed operational policy to normalize before planning."""
+
+    rule_id: str = Field(min_length=1)
+    rule_code: str = Field(min_length=1)
+    description: str | None = None
+    scope_type: Literal["organization", "facility"] = "organization"
+    scope_id: str | None = None
+    numeric_value: float | None = None
+    boolean_value: bool | None = None
+    unit: str | None = None
+    severity: Literal["hard", "warning"] = "hard"
+    active: bool = True
+    source: dict[str, Any] = Field(default_factory=dict)
+
+
+class FacilityScope(BaseModel):
+    """Location and service facts needed to enforce a shared-facility rule."""
+
+    scope_id: str = Field(min_length=1)
+    location_id: str = Field(min_length=1)
+    service_minutes: int = Field(gt=0)
 
 
 class PlanningTimeWindow(BaseModel):
@@ -120,6 +147,190 @@ class PlanningConstraint(BaseModel):
     source: dict[str, Any] = Field(default_factory=dict)
 
 
+def normalize_operational_rules(
+    rules: list[OperationalRule],
+    facility_scopes: list[FacilityScope],
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Translate source-backed operational policies into planner constraints.
+
+    The planner consumes a small, explicit vocabulary. This boundary prevents
+    an LLM from inventing a constraint name and then presenting an unsupported
+    policy as though it had been validated.
+    """
+    _ = tool_context
+    try:
+        rule_models = _coerce_list(rules, OperationalRule)
+        scope_models = _coerce_list(facility_scopes, FacilityScope)
+    except ValidationError as error:
+        return _validation_error(error)
+    scopes = {item.scope_id: item for item in scope_models}
+    active = [item for item in rule_models if item.active]
+    by_code = {item.rule_code.upper(): item for item in active}
+    unknown = [
+        item for item in active
+        if item.rule_code.upper()
+        not in {
+            "RETURN_TO_HOME_FACILITY",
+            "DRIVER_BREAK_AFTER_MINUTES",
+            "DRIVER_BREAK_DURATION",
+            "MAX_LOADING_CONCURRENCY",
+            "COLD_CHAIN_CERTIFICATION_REQUIRED",
+            "DELIVERY_WINDOW_GRACE",
+            "TARGET_VEHICLE_UTILIZATION",
+            "PREFER_FEWER_ACTIVE_VEHICLES",
+        }
+    ]
+    hard_unknown = [item for item in unknown if item.severity == "hard"]
+    if hard_unknown:
+        return {
+            "status": "error",
+            "error": {
+                "code": "UNMODELED_HARD_POLICY",
+                "message": "A hard operational policy cannot be enforced by this planner.",
+                "policies": [
+                    {"rule_id": item.rule_id, "rule_code": item.rule_code}
+                    for item in hard_unknown
+                ],
+            },
+        }
+
+    constraints: list[PlanningConstraint] = []
+
+    def add(rule: OperationalRule, kind: str, parameters: dict[str, Any]) -> None:
+        constraints.append(
+            PlanningConstraint(
+                constraint_id=rule.rule_id,
+                kind=kind,
+                severity=rule.severity,
+                parameters=parameters,
+                description=rule.description,
+                source={"rule_code": rule.rule_code, **rule.source},
+            )
+        )
+
+    if (rule := by_code.get("RETURN_TO_HOME_FACILITY")) and rule.boolean_value:
+        add(rule, "return_to_start", {"enabled": True})
+    break_after = by_code.get("DRIVER_BREAK_AFTER_MINUTES")
+    break_duration = by_code.get("DRIVER_BREAK_DURATION")
+    if break_after or break_duration:
+        if not break_after or not break_duration or break_after.numeric_value is None or break_duration.numeric_value is None:
+            return {
+                "status": "error",
+                "error": {
+                    "code": "INCOMPLETE_DRIVER_BREAK_POLICY",
+                    "message": "Driver-break policy requires both the work threshold and break duration.",
+                },
+            }
+        add(
+            break_after,
+            "driver_break",
+            {"after_minutes": break_after.numeric_value, "duration_minutes": break_duration.numeric_value},
+        )
+    if (rule := by_code.get("MAX_LOADING_CONCURRENCY")):
+        scope = scopes.get(rule.scope_id or "")
+        if rule.numeric_value is None or scope is None:
+            return {
+                "status": "error",
+                "error": {
+                    "code": "INCOMPLETE_FACILITY_CONCURRENCY_POLICY",
+                    "message": "Facility concurrency requires its facility location and loading duration.",
+                },
+            }
+        add(rule, "facility_concurrency", {"maximum": int(rule.numeric_value), "location_id": scope.location_id, "duration_minutes": scope.service_minutes})
+    if (rule := by_code.get("COLD_CHAIN_CERTIFICATION_REQUIRED")) and rule.boolean_value:
+        add(rule, "cold_chain_certification", {"capability": "cold_chain_certified"})
+    if (rule := by_code.get("DELIVERY_WINDOW_GRACE")):
+        add(rule, "allowed_lateness_minutes", {"minutes": rule.numeric_value or 0})
+    if (rule := by_code.get("TARGET_VEHICLE_UTILIZATION")) and rule.numeric_value is not None:
+        add(rule, "minimum_utilization", {"percent": rule.numeric_value})
+    if (rule := by_code.get("PREFER_FEWER_ACTIVE_VEHICLES")) and rule.boolean_value:
+        add(rule, "prefer_fewer_resources", {"enabled": True})
+    return {
+        "status": "success",
+        "constraints": [item.model_dump(mode="json") for item in constraints],
+        "warnings": [
+            {"code": "UNMODELED_WARNING_POLICY", "message": item.description or item.rule_code}
+            for item in unknown
+            if item.severity == "warning"
+        ],
+    }
+
+
+def compose_resources(
+    assets: list[PlanningResource],
+    operators: list[PlanningResource],
+    tool_context: ToolContext,
+) -> dict[str, Any]:
+    """Create one-to-one feasible asset/operator planning resources.
+
+    This is domain-neutral: an asset can be a vehicle, machine, or other
+    capacity-bearing resource, and an operator can be a person or crew.
+    Pairing is deterministic and prevents one operator from being assigned to
+    multiple assets in the same plan.
+    """
+    _ = tool_context
+    try:
+        asset_models = _coerce_list(assets, PlanningResource)
+        operator_models = _coerce_list(operators, PlanningResource)
+    except ValidationError as error:
+        return _validation_error(error)
+    available_operators = [item for item in sorted(operator_models, key=lambda item: item.resource_id) if item.available]
+    paired: list[PlanningResource] = []
+    unmatched_assets: list[str] = []
+    for asset in sorted(asset_models, key=lambda item: item.resource_id):
+        if not asset.available:
+            continue
+        selected_index: int | None = None
+        selected_windows: list[PlanningTimeWindow] = []
+        for index, operator in enumerate(available_operators):
+            default_window = PlanningTimeWindow(
+                start_at=datetime(1970, 1, 1, tzinfo=timezone.utc),
+                end_at=datetime(2100, 1, 1, tzinfo=timezone.utc),
+            )
+            windows = [
+                PlanningTimeWindow(
+                    start_at=max(_as_utc(left.start_at), _as_utc(right.start_at)),
+                    end_at=min(_as_utc(left.end_at), _as_utc(right.end_at)),
+                )
+                for left in (asset.availability or [default_window])
+                for right in (operator.availability or [default_window])
+                if min(_as_utc(left.end_at), _as_utc(right.end_at)) > max(_as_utc(left.start_at), _as_utc(right.start_at))
+            ]
+            if windows:
+                selected_index = index
+                selected_windows = windows
+                break
+        if selected_index is None:
+            unmatched_assets.append(asset.resource_id)
+            continue
+        operator = available_operators.pop(selected_index)
+        paired.append(
+            PlanningResource(
+                resource_id=f"{asset.resource_id}::{operator.resource_id}",
+                resource_type=asset.resource_type,
+                member_ids=[asset.resource_id, operator.resource_id],
+                available=True,
+                availability=selected_windows,
+                capabilities=sorted(set(asset.capabilities) | set(operator.capabilities)),
+                capacities=asset.capacities,
+                start_location_id=asset.start_location_id or operator.start_location_id,
+                end_location_id=asset.end_location_id or asset.start_location_id or operator.end_location_id or operator.start_location_id,
+                max_work_minutes=min(
+                    [value for value in (asset.max_work_minutes, operator.max_work_minutes) if value is not None],
+                    default=None,
+                ),
+                cost_per_hour=asset.cost_per_hour + operator.cost_per_hour,
+                source={"asset_id": asset.resource_id, "operator_id": operator.resource_id},
+            )
+        )
+    return {
+        "status": "success",
+        "resources": [item.model_dump(mode="json") for item in paired],
+        "unpaired_asset_ids": unmatched_assets,
+    }
+
+
 class TravelMatrixElement(BaseModel):
     """One travel cost between organizational location references."""
 
@@ -192,7 +403,10 @@ def _validation_error(error: ValidationError) -> dict[str, Any]:
         "error": {
             "code": "INVALID_PLANNING_INPUT",
             "message": "Planning input failed validation.",
-            "details": error.errors(include_url=False),
+            # Pydantic validation context may contain the original Python
+            # exception (for example, ValueError). Tool results are saved in
+            # the ADK Firestore session and must remain JSON-serializable.
+            "details": error.errors(include_url=False, include_context=False),
         },
     }
 
@@ -247,13 +461,24 @@ def _constraint_value(
     return default
 
 
-def _eligibility_reason(task: PlanningTask, resource: PlanningResource) -> str | None:
+def _eligibility_reason(
+    task: PlanningTask,
+    resource: PlanningResource,
+    constraints: list[PlanningConstraint] | None = None,
+) -> str | None:
     if not resource.available:
         return "resource_unavailable"
     if task.required_resource_type and task.required_resource_type != resource.resource_type:
         return "resource_type_mismatch"
     if not set(task.required_capabilities).issubset(resource.capabilities):
         return "missing_capability"
+    cold_chain = next(
+        (item for item in constraints or [] if item.kind == "cold_chain_certification"),
+        None,
+    )
+    refrigerated = bool(task.source.get("requires_refrigeration")) or "cold_chain" in task.required_capabilities
+    if cold_chain and refrigerated and cold_chain.parameters.get("capability") not in resource.capabilities:
+        return "cold_chain_certification_required"
     if task.allowed_resource_ids and resource.resource_id not in task.allowed_resource_ids:
         return "resource_not_allowed"
     if resource.resource_id in task.forbidden_resource_ids:
@@ -279,7 +504,7 @@ def _unsupported_hard_constraints(
         {
             "code": "UNSUPPORTED_HARD_CONSTRAINT",
             "constraint_id": item.constraint_id,
-            "message": f"Hard constraint '{item.kind}' is not supported.",
+            "message": "An essential operational policy could not be modeled for this plan.",
         }
         for item in constraints
         if item.severity == "hard" and item.kind not in SUPPORTED_CONSTRAINTS
@@ -299,6 +524,36 @@ def _schedule_local_assignments(
     allowed_lateness = float(
         _constraint_value(constraints, "allowed_lateness_minutes", "minutes", 0)
     )
+    break_policy = next(
+        (item.parameters for item in constraints if item.kind == "driver_break"), None
+    )
+    break_after = float(break_policy.get("after_minutes", 0)) if break_policy else 0
+    break_duration = float(break_policy.get("duration_minutes", 0)) if break_policy else 0
+    facility_policy = next(
+        (item.parameters for item in constraints if item.kind == "facility_concurrency"),
+        None,
+    )
+    facility_intervals: dict[str, list[tuple[datetime, datetime]]] = defaultdict(list)
+
+    def next_facility_start(start: datetime, origin: str | None) -> datetime:
+        if not facility_policy or origin != facility_policy.get("location_id"):
+            return start
+        maximum = max(1, int(facility_policy.get("maximum", 1)))
+        duration = timedelta(minutes=max(1, float(facility_policy.get("duration_minutes", 1))))
+        intervals = facility_intervals[origin]
+        candidate = start
+        while True:
+            ending = candidate + duration
+            overlapping = [end for active_start, end in intervals if active_start < ending and end > candidate]
+            if len(overlapping) < maximum:
+                return candidate
+            candidate = min(overlapping)
+
+    def reserve_facility(start: datetime, origin: str | None) -> None:
+        if not facility_policy or origin != facility_policy.get("location_id"):
+            return
+        duration = timedelta(minutes=max(1, float(facility_policy.get("duration_minutes", 1))))
+        facility_intervals[origin].append((start, start + duration))
     grouped: dict[str, list[PlanningTask]] = defaultdict(list)
     for task_id, resource_id in selected.items():
         grouped[resource_id].append(task_by_id[task_id])
@@ -335,6 +590,7 @@ def _schedule_local_assignments(
         cursor = _as_utc(availability[0].start_at)
         current_location = resource.start_location_id
         sequence = 1
+        continuous_minutes = 0.0
         for task in assigned_tasks:
             origin, destination = _task_locations(task)
             before_seconds, before_meters, before_found = _travel(
@@ -353,6 +609,10 @@ def _schedule_local_assignments(
             duration = timedelta(seconds=travel_seconds) + timedelta(
                 minutes=task.duration_minutes
             )
+            work_minutes = duration.total_seconds() / 60
+            if break_after and continuous_minutes and continuous_minutes + work_minutes > break_after:
+                cursor += timedelta(minutes=break_duration)
+                continuous_minutes = 0.0
             task_windows = sorted(task.time_windows, key=lambda item: _as_utc(item.start_at))
             scheduled: tuple[datetime, datetime] | None = None
             while window_index < len(availability) and scheduled is None:
@@ -361,11 +621,11 @@ def _schedule_local_assignments(
                 resource_end = _as_utc(resource_window.end_at)
                 candidate_windows = task_windows or [resource_window]
                 for task_window in candidate_windows:
-                    start = max(
+                    start = next_facility_start(max(
                         cursor,
                         resource_start,
                         _as_utc(task_window.start_at),
-                    )
+                    ), origin)
                     end = start + duration
                     latest = min(
                         resource_end,
@@ -373,6 +633,7 @@ def _schedule_local_assignments(
                     )
                     if end <= latest:
                         scheduled = (start, end)
+                        reserve_facility(start, origin)
                         break
                 if scheduled is None:
                     window_index += 1
@@ -400,7 +661,22 @@ def _schedule_local_assignments(
             assignments.append(assignment)
             cursor = end
             current_location = destination
+            continuous_minutes += work_minutes
             sequence += 1
+        if any(item.kind == "return_to_start" and item.parameters.get("enabled", True) for item in constraints) and current_location and resource.end_location_id:
+            return_seconds, _return_meters, return_found = _travel(
+                lookup, current_location, resource.end_location_id
+            )
+            if matrix is not None and not return_found:
+                last = next((item for item in reversed(assignments) if item.resource_id == resource_id), None)
+                if last:
+                    assignments.remove(last)
+                    unscheduled.append({"task_id": last.task_id, "reason": "return_route_missing"})
+            elif cursor + timedelta(seconds=return_seconds) > _as_utc(availability[-1].end_at):
+                last = next((item for item in reversed(assignments) if item.resource_id == resource_id), None)
+                if last:
+                    assignments.remove(last)
+                    unscheduled.append({"task_id": last.task_id, "reason": "return_to_home_unavailable"})
     return assignments, unscheduled
 
 
@@ -441,7 +717,7 @@ def _optimize_local(
     eligibility: dict[str, dict[str, str]] = defaultdict(dict)
     for task_index, task in enumerate(tasks):
         for resource_index, resource in enumerate(resources):
-            reason = _eligibility_reason(task, resource)
+            reason = _eligibility_reason(task, resource, constraints)
             if reason:
                 eligibility[task.task_id][resource.resource_id] = reason
                 continue
@@ -1101,7 +1377,7 @@ def validate_plan(
             hard.append(_issue("UNKNOWN_RESOURCE", "The plan references an unknown resource.", resource_id=assignment.resource_id))
             continue
         grouped[resource.resource_id].append(assignment)
-        reason = _eligibility_reason(task, resource)
+        reason = _eligibility_reason(task, resource, constraint_models)
         if reason:
             hard.append(
                 _issue(
@@ -1124,6 +1400,14 @@ def validate_plan(
             for window in task.time_windows
         ):
             hard.append(_issue("TASK_TIME_WINDOW_VIOLATION", "The assignment violates its task time window.", task_id=task.task_id, resource_id=resource.resource_id))
+
+        cold_chain = next(
+            (item for item in constraint_models if item.kind == "cold_chain_certification"),
+            None,
+        )
+        refrigerated = bool(task.source.get("requires_refrigeration")) or "cold_chain" in task.required_capabilities
+        if cold_chain and refrigerated and cold_chain.parameters.get("capability") not in resource.capabilities:
+            hard.append(_issue("COLD_CHAIN_CERTIFICATION_REQUIRED", "The assigned resource lacks the required cold-chain-certified operator.", task_id=task.task_id, resource_id=resource.resource_id, constraint_id=cold_chain.constraint_id))
 
     lookup = _matrix_lookup(matrix_model)
     for resource_id, assignments in grouped.items():
@@ -1154,6 +1438,51 @@ def validate_plan(
         work_minutes = sum((item.end_at - item.start_at).total_seconds() / 60 for item in assignments)
         if effective_max is not None and work_minutes > float(effective_max):
             hard.append(_issue("MAX_WORK_EXCEEDED", "Resource work exceeds the allowed maximum.", resource_id=resource_id, details={"work_minutes": work_minutes, "maximum": effective_max}))
+
+        break_policy = next((item for item in constraint_models if item.kind == "driver_break"), None)
+        if break_policy:
+            threshold = float(break_policy.parameters.get("after_minutes", 0))
+            required_break = timedelta(minutes=float(break_policy.parameters.get("duration_minutes", 0)))
+            continuous = 0.0
+            previous_end: datetime | None = None
+            for assignment in assignments:
+                if previous_end is not None and assignment.start_at - previous_end >= required_break:
+                    continuous = 0.0
+                continuous += (assignment.end_at - assignment.start_at).total_seconds() / 60
+                if threshold and continuous > threshold:
+                    hard.append(_issue("DRIVER_BREAK_REQUIRED", "The resource exceeds its continuous-work limit without the required break.", task_id=assignment.task_id, resource_id=resource_id, constraint_id=break_policy.constraint_id))
+                    break
+                previous_end = assignment.end_at
+
+        return_policy = next((item for item in constraint_models if item.kind == "return_to_start" and item.parameters.get("enabled", True)), None)
+        if return_policy and assignments:
+            last = assignments[-1]
+            destination = resource.end_location_id or resource.start_location_id
+            seconds, _meters, found = _travel(lookup, last.destination_location_id, destination)
+            deadline = max((_as_utc(window.end_at) for window in resource.availability), default=None)
+            if (matrix_model is not None and not found) or (deadline is not None and last.end_at + timedelta(seconds=seconds) > deadline):
+                hard.append(_issue("RETURN_TO_HOME_VIOLATION", "The resource cannot return to its required home location within availability.", resource_id=resource_id, constraint_id=return_policy.constraint_id))
+
+    facility_policy = next((item for item in constraint_models if item.kind == "facility_concurrency"), None)
+    if facility_policy:
+        location_id = facility_policy.parameters.get("location_id")
+        maximum = max(1, int(facility_policy.parameters.get("maximum", 1)))
+        duration = timedelta(minutes=max(1, float(facility_policy.parameters.get("duration_minutes", 1))))
+        intervals = sorted(
+            [
+                (assignment.start_at, assignment.start_at + duration)
+                for assignment in plan_model.assignments
+                if assignment.origin_location_id == location_id
+            ],
+            key=lambda item: item[0],
+        )
+        active: list[datetime] = []
+        for start, end in intervals:
+            active = [item for item in active if item > start]
+            active.append(end)
+            if len(active) > maximum:
+                hard.append(_issue("FACILITY_LOADING_CONCURRENCY_EXCEEDED", "Too many resources are scheduled to load at the facility at the same time.", constraint_id=facility_policy.constraint_id, details={"location_id": location_id, "maximum": maximum}))
+                break
 
     assignment_by_task = {item.task_id: item for item in plan_model.assignments}
     for task in task_models:
@@ -1212,6 +1541,8 @@ __all__ = [
     "PlanAssignment",
     "PlanningConstraint",
     "PlanningCoordinate",
+    "OperationalRule",
+    "FacilityScope",
     "PlanningLocation",
     "PlanningResource",
     "PlanningTask",
@@ -1219,6 +1550,8 @@ __all__ = [
     "PlanningTravelMatrix",
     "TravelMatrixElement",
     "calculate_plan_metrics",
+    "compose_resources",
+    "normalize_operational_rules",
     "optimize_assignments",
     "validate_plan",
 ]

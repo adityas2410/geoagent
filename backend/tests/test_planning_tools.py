@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import unittest
@@ -17,6 +18,8 @@ from google.auth.exceptions import DefaultCredentialsError  # noqa: E402
 
 from geoagent.agent import PlanningFindings, PlanningRequest  # noqa: E402
 from geoagent.planning_tools import calculate_plan_metrics  # noqa: E402
+from geoagent.planning_tools import compose_resources  # noqa: E402
+from geoagent.planning_tools import normalize_operational_rules  # noqa: E402
 from geoagent.planning_tools import optimize_assignments  # noqa: E402
 from geoagent.planning_tools import validate_plan  # noqa: E402
 
@@ -83,6 +86,20 @@ def matrix() -> dict:
 
 
 class PlanningToolsTest(unittest.TestCase):
+    def test_invalid_planning_input_returns_json_safe_tool_error(self) -> None:
+        result = optimize_assignments(
+            tasks=[task("task-1", "a", time_windows=[window(start=END, end=START)])],
+            resources=[resource()],
+            constraints=[],
+            solver="local",
+            tool_context=CONTEXT,
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error"]["code"], "INVALID_PLANNING_INPUT")
+        self.assertEqual(result["error"]["details"][0]["type"], "value_error")
+        json.dumps(result)
+
     def test_local_optimizer_is_deterministic_and_uses_travel_costs(self) -> None:
         arguments = {
             "tasks": [task("task-1", "a"), task("task-2", "b")],
@@ -128,6 +145,80 @@ class PlanningToolsTest(unittest.TestCase):
         self.assertFalse(result["feasible"])
         self.assertEqual(len(result["plan"]["assignments"]), 1)
         self.assertEqual(result["violations"][0]["code"], "MANDATORY_TASK_UNASSIGNED")
+
+    def test_normalizes_demo_hard_rules_without_unsupported_constraint_names(self) -> None:
+        rules = [
+            {"rule_id": "return", "rule_code": "RETURN_TO_HOME_FACILITY", "boolean_value": True},
+            {"rule_id": "break-after", "rule_code": "DRIVER_BREAK_AFTER_MINUTES", "numeric_value": 240},
+            {"rule_id": "break-duration", "rule_code": "DRIVER_BREAK_DURATION", "numeric_value": 30},
+            {"rule_id": "loading", "rule_code": "MAX_LOADING_CONCURRENCY", "scope_type": "facility", "scope_id": "facility-1", "numeric_value": 2},
+            {"rule_id": "cold", "rule_code": "COLD_CHAIN_CERTIFICATION_REQUIRED", "boolean_value": True},
+            {"rule_id": "grace", "rule_code": "DELIVERY_WINDOW_GRACE", "numeric_value": 0},
+        ]
+        result = normalize_operational_rules(
+            rules=rules,
+            facility_scopes=[{"scope_id": "facility-1", "location_id": "depot", "service_minutes": 20}],
+            tool_context=CONTEXT,
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(
+            {item["kind"] for item in result["constraints"]},
+            {"return_to_start", "driver_break", "facility_concurrency", "cold_chain_certification", "allowed_lateness_minutes"},
+        )
+
+    def test_composes_asset_and_operator_into_one_feasible_resource(self) -> None:
+        result = compose_resources(
+            assets=[resource(resource_id="vehicle", capabilities=["refrigerated"], capacities={"units": 5})],
+            operators=[resource(resource_id="driver", resource_type="operator", capabilities=["cold_chain_certified"], capacities={}, max_work_minutes=240)],
+            tool_context=CONTEXT,
+        )
+
+        self.assertEqual(result["status"], "success")
+        paired = result["resources"][0]
+        self.assertEqual(paired["member_ids"], ["vehicle", "driver"])
+        self.assertIn("cold_chain_certified", paired["capabilities"])
+        self.assertEqual(paired["max_work_minutes"], 240)
+
+    def test_validator_enforces_cold_chain_break_concurrency_and_return_rules(self) -> None:
+        extended_end = START + timedelta(hours=10)
+        first_end = START + timedelta(hours=3)
+        second_end = first_end + timedelta(hours=3)
+        resources = [
+            resource(resource_id="resource-1", availability=[window(START, extended_end)], end_location_id="depot"),
+            resource(resource_id="resource-2", availability=[window(START, extended_end)], end_location_id="depot"),
+        ]
+        tasks = [
+            task("task-1", "a", source={"requires_refrigeration": True}),
+            task("task-2", "b"),
+            task("task-3", "a"),
+        ]
+        plan = {
+            "assignments": [
+                {"task_id": "task-1", "resource_id": "resource-1", "sequence": 1, "start_at": START, "end_at": first_end, "origin_location_id": "depot", "destination_location_id": "a"},
+                {"task_id": "task-2", "resource_id": "resource-1", "sequence": 2, "start_at": first_end, "end_at": second_end, "origin_location_id": "a", "destination_location_id": "b"},
+                {"task_id": "task-3", "resource_id": "resource-2", "sequence": 1, "start_at": START, "end_at": START + timedelta(hours=1), "origin_location_id": "depot", "destination_location_id": "a"},
+            ]
+        }
+        constraints = [
+            {"constraint_id": "cold", "kind": "cold_chain_certification", "parameters": {"capability": "cold_chain_certified"}},
+            {"constraint_id": "break", "kind": "driver_break", "parameters": {"after_minutes": 240, "duration_minutes": 30}},
+            {"constraint_id": "facility", "kind": "facility_concurrency", "parameters": {"location_id": "depot", "maximum": 1, "duration_minutes": 20}},
+            {"constraint_id": "return", "kind": "return_to_start", "parameters": {"enabled": True}},
+        ]
+        travel_matrix = {
+            "elements": [
+                {"origin_reference_id": "a", "destination_reference_id": "b", "duration_seconds": 0, "distance_meters": 0},
+                {"origin_reference_id": "a", "destination_reference_id": "depot", "duration_seconds": 0, "distance_meters": 0},
+            ]
+        }
+        result = validate_plan(plan, tasks, resources, constraints, CONTEXT, travel_matrix)
+        codes = {item["code"] for item in result["hard_violations"]}
+
+        self.assertIn("COLD_CHAIN_CERTIFICATION_REQUIRED", codes)
+        self.assertIn("DRIVER_BREAK_REQUIRED", codes)
+        self.assertIn("FACILITY_LOADING_CONCURRENCY_EXCEEDED", codes)
+        self.assertIn("RETURN_TO_HOME_VIOLATION", codes)
 
     def test_metrics_are_exact_and_keep_work_separate_from_travel(self) -> None:
         plan = {
@@ -310,6 +401,8 @@ class PlanningToolsTest(unittest.TestCase):
 
     def test_adk_declarations_and_agent_schemas(self) -> None:
         expected = {
+            normalize_operational_rules: {"rules", "facility_scopes"},
+            compose_resources: {"assets", "operators"},
             optimize_assignments: {
                 "tasks",
                 "resources",

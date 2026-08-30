@@ -9,6 +9,7 @@ import unittest
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 from unittest.mock import patch
 
 
@@ -341,17 +342,28 @@ class WorkspaceQuestionApiTest(unittest.TestCase):
 
 class ObservabilityPrivacyTest(unittest.TestCase):
     def test_cloud_telemetry_never_captures_message_content(self) -> None:
+        resource = Mock()
         with patch.dict(
             os.environ,
             {
                 "GEOAGENT_OTEL_TO_CLOUD": "true",
+                "GOOGLE_CLOUD_PROJECT": "geoagent-hackathon",
                 "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": "EVENT_ONLY",
             },
             clear=False,
         ), patch(
             "google.adk.telemetry.google_cloud.get_gcp_exporters", return_value=[]
-        ), patch("google.adk.telemetry.setup.maybe_set_otel_providers"):
+        ), patch(
+            "google.adk.telemetry.google_cloud.get_gcp_resource",
+            return_value=resource,
+        ) as get_gcp_resource, patch(
+            "google.adk.telemetry.setup.maybe_set_otel_providers"
+        ) as set_otel_providers:
             configure_observability()
+            get_gcp_resource.assert_called_once_with(project_id="geoagent-hackathon")
+            set_otel_providers.assert_called_once_with(
+                [[]], otel_resource=resource
+            )
             self.assertEqual(
                 os.environ["OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"],
                 "NO_CONTENT",

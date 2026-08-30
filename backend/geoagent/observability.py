@@ -51,10 +51,20 @@ def configure_observability() -> None:
     os.environ["ADK_CAPTURE_MESSAGE_CONTENT_IN_SPANS"] = "false"
 
     from google.adk.telemetry.google_cloud import get_gcp_exporters
+    from google.adk.telemetry.google_cloud import get_gcp_resource
     from google.adk.telemetry.setup import maybe_set_otel_providers
 
+    project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
+    if not project_id:
+        raise RuntimeError(
+            "GOOGLE_CLOUD_PROJECT is required when GEOAGENT_OTEL_TO_CLOUD is enabled"
+        )
     exporters = get_gcp_exporters(
         enable_cloud_tracing=True,
         enable_cloud_logging=True,
     )
-    maybe_set_otel_providers([exporters])
+    # ADK's GCP trace endpoint requires gcp.project_id on the Resource. The
+    # default provider resource contains only generic OTel attributes locally.
+    maybe_set_otel_providers(
+        [exporters], otel_resource=get_gcp_resource(project_id=project_id)
+    )

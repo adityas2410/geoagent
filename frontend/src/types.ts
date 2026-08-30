@@ -59,6 +59,10 @@ export interface MapAssignment {
   travel_duration_seconds?: number | null;
 }
 
+export interface MissionPresentationFinding {
+  message: string;
+}
+
 export type MapAvailability = Record<
   "locations" | "routes" | "assignments" | "metrics" | "validation",
   "not_requested" | "available" | "unavailable" | "not_applicable"
@@ -76,10 +80,10 @@ export interface MissionMapState {
   metrics?: Record<string, unknown> | null;
   validation?: {
     feasible?: boolean | null;
-    hard_violations?: Array<Record<string, unknown>>;
-    warnings?: Array<Record<string, unknown>>;
+    hard_violations?: MissionPresentationFinding[];
+    warnings?: MissionPresentationFinding[];
   } | null;
-  warnings: Array<Record<string, unknown>>;
+  warnings: MissionPresentationFinding[];
 }
 
 export interface Clarification {
@@ -100,6 +104,25 @@ export interface ObjectiveDecision {
   accepted_at?: string | null;
 }
 
+export interface MissionRunMetrics {
+  run_id: string;
+  started_at: string;
+  updated_at: string;
+  llm_requests: number;
+  fallback_requests: number;
+  tool_calls: number;
+  specialist_delegations: number;
+  llm_requests_by_agent: Record<string, number>;
+  model_requests: Record<string, number>;
+  model_failures: Record<string, number>;
+  input_tokens: number;
+  output_tokens: number;
+  thinking_tokens: number;
+  cached_input_tokens: number;
+  tool_use_prompt_tokens: number;
+  total_tokens: number;
+}
+
 export interface Mission {
   mission_id: string;
   workspace_id: string;
@@ -112,6 +135,7 @@ export interface Mission {
   objective_decision?: ObjectiveDecision | null;
   plan?: Record<string, unknown> | null;
   map_state?: MissionMapState | null;
+  run_metrics: MissionRunMetrics[];
   error?: string | null;
   created_at: string;
   updated_at: string;

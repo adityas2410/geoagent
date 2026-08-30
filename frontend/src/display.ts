@@ -1,4 +1,40 @@
-import type { MapAvailability, MissionEvent, MissionStatus } from "./types";
+import type { MapAvailability, MissionEvent, MissionRunMetrics, MissionStatus } from "./types";
+
+/** The Plan tab receives presentation-safe backend findings, never internal metadata. */
+export function presentationMessage<T extends { message?: unknown }>(finding: T) {
+  return typeof finding.message === "string" && finding.message.trim()
+    ? finding.message
+    : "A planning result needs review.";
+}
+
+function sumMetricMaps(values: Array<Record<string, number>>) {
+  return values.reduce<Record<string, number>>((total, value) => {
+    for (const [key, count] of Object.entries(value)) total[key] = (total[key] || 0) + count;
+    return total;
+  }, {});
+}
+
+export function cumulativeMissionMetrics(runs: MissionRunMetrics[]) {
+  const latest = runs.at(-1);
+  if (!latest) return undefined;
+  const numeric = ["llm_requests", "fallback_requests", "tool_calls", "specialist_delegations", "input_tokens", "output_tokens", "thinking_tokens", "cached_input_tokens", "tool_use_prompt_tokens", "total_tokens"] as const;
+  const total = { ...latest };
+  for (const key of numeric) total[key] = runs.reduce((sum, run) => sum + run[key], 0);
+  total.llm_requests_by_agent = sumMetricMaps(runs.map((run) => run.llm_requests_by_agent));
+  total.model_requests = sumMetricMaps(runs.map((run) => run.model_requests));
+  total.model_failures = sumMetricMaps(runs.map((run) => run.model_failures));
+  total.started_at = runs[0].started_at;
+  return total;
+}
+
+export function missionRuntimeSeconds(runs: MissionRunMetrics[], status: MissionStatus, currentOnly = false) {
+  const selected = currentOnly ? runs.slice(-1) : runs;
+  return selected.reduce((total, run, index) => {
+    const start = Date.parse(run.started_at);
+    const end = status === "running" && index === selected.length - 1 ? Date.now() : Date.parse(run.updated_at);
+    return total + Math.max(0, (end - start) / 1000);
+  }, 0);
+}
 
 const agentEventTypes = new Set([
   "task_delegated",
@@ -6,6 +42,9 @@ const agentEventTypes = new Set([
   "specialist_completed",
   "tool_called",
   "tool_result",
+  "model_requested",
+  "model_completed",
+  "model_failed",
 ]);
 
 const lifecycleEventTypes = new Set([
@@ -17,6 +56,9 @@ const lifecycleEventTypes = new Set([
   "objective_revision_accepted",
   "plan_published",
   "mission_failed",
+  "model_requested",
+  "model_completed",
+  "model_failed",
 ]);
 
 export const statusLabel = (status: MissionStatus) =>
@@ -95,6 +137,9 @@ export function mapAvailabilityMessage(
 export function describeEvent(event: MissionEvent): string {
   const result = event.payload.result;
   if (event.type === "tool_called") return `Calling ${humanize(event.tool)}`;
+  if (event.type === "model_requested") return `Requesting ${String(event.payload.model || "Gemini")} response`;
+  if (event.type === "model_completed") return `Received ${String(event.payload.model || "Gemini")} response`;
+  if (event.type === "model_failed") return `${String(event.payload.model || "Gemini")} request failed`;
   if (event.type === "tool_result") return `${humanize(event.tool)}: ${summarizeResult(result)}`;
   if (event.type === "task_delegated") return `Delegated to ${humanize(String(event.payload.specialist || event.tool))}`;
   if (event.type === "specialist_started") return "Started delegated work";

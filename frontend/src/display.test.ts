@@ -1,13 +1,37 @@
 import { describe, expect, it } from "vitest";
 import {
+  cumulativeMissionMetrics,
   describeEvent,
   hasEventDetails,
   isAgentEvent,
   isLifecycleEvent,
   mapAvailabilityMessage,
+  missionRuntimeSeconds,
+  presentationMessage,
   statusLabel,
 } from "./display";
-import type { MissionEvent } from "./types";
+import type { MissionEvent, MissionRunMetrics } from "./types";
+
+function run(id: string, startedAt: string, updatedAt: string, llmRequests: number): MissionRunMetrics {
+  return {
+    run_id: id,
+    started_at: startedAt,
+    updated_at: updatedAt,
+    llm_requests: llmRequests,
+    fallback_requests: 0,
+    tool_calls: 2,
+    specialist_delegations: 1,
+    llm_requests_by_agent: { mission_manager: llmRequests },
+    model_requests: { "gemini-test": llmRequests },
+    model_failures: {},
+    input_tokens: 10,
+    output_tokens: 5,
+    thinking_tokens: 0,
+    cached_input_tokens: 0,
+    tool_use_prompt_tokens: 0,
+    total_tokens: 15,
+  };
+}
 
 describe("frontend display helpers", () => {
   it("renders every backend Mission status without inventing a state", () => {
@@ -51,5 +75,26 @@ describe("frontend display helpers", () => {
     expect(mapAvailabilityMessage("not_requested", "running")).toBe("Not available yet");
     expect(mapAvailabilityMessage("not_requested", "completed")).toBe("Not returned for this Mission");
     expect(mapAvailabilityMessage("unavailable", "failed")).toBe("Unavailable — see Agents for the tool result.");
+  });
+
+  it("uses the backend presentation message and ignores internal finding fields", () => {
+    expect(presentationMessage({
+      code: "DRIVER_BREAK_REQUIRED",
+      constraint_id: "RULE-002",
+      message: "A required break cannot fit within the available shift.",
+    })).toBe("A required break cannot fit within the available shift.");
+  });
+
+  it("keeps Mission totals and elapsed runtime across replans", () => {
+    const runs = [
+      run("run-1", "2026-08-30T10:00:00Z", "2026-08-30T10:01:00Z", 3),
+      run("run-2", "2026-08-30T11:00:00Z", "2026-08-30T11:02:30Z", 4),
+    ];
+
+    expect(cumulativeMissionMetrics(runs)?.llm_requests).toBe(7);
+    expect(cumulativeMissionMetrics(runs)?.tool_calls).toBe(4);
+    expect(cumulativeMissionMetrics(runs)?.llm_requests_by_agent).toEqual({ mission_manager: 7 });
+    expect(missionRuntimeSeconds(runs, "completed")).toBe(210);
+    expect(missionRuntimeSeconds(runs, "completed", true)).toBe(150);
   });
 });

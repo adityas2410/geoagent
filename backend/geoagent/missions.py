@@ -398,17 +398,35 @@ def _as_float(value: Any) -> float | None:
     return result if result == result and abs(result) != float("inf") else None
 
 
-def _safe_map_warnings(result: dict[str, Any], tool: str) -> list[dict[str, Any]]:
-    """Keep only structured, frontend-safe tool warnings and errors."""
+def _presentation_findings(value: Any, fallback: str) -> list[dict[str, str]]:
+    """Project findings into the single safe field used by the Plan tab."""
+    if not isinstance(value, list):
+        return []
+    findings: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        message = item.get("message")
+        findings.append(
+            {
+                "message": message.strip()
+                if isinstance(message, str) and message.strip()
+                else fallback
+            }
+        )
+    return findings
+
+
+def _safe_map_warnings(result: dict[str, Any], tool: str) -> list[dict[str, str]]:
+    """Keep only presentation-safe tool warnings and errors for the Plan tab."""
     issues: list[dict[str, Any]] = []
     for key in ("warnings", "errors"):
         for issue in result.get(key, []):
             if not isinstance(issue, dict):
                 continue
-            code = issue.get("code")
             message = issue.get("message")
-            if isinstance(code, str) and isinstance(message, str):
-                issues.append({"tool": tool, "code": code, "message": message})
+            if isinstance(message, str) and message.strip():
+                issues.append({"message": message.strip()})
     return issues
 
 
@@ -575,8 +593,14 @@ def _map_state_after_tool_result(
     elif tool == "validate_plan":
         changes["validation"] = {
             "feasible": result.get("feasible"),
-            "hard_violations": result.get("hard_violations", result.get("violations", [])),
-            "warnings": result.get("warnings", []),
+            "hard_violations": _presentation_findings(
+                result.get("hard_violations", result.get("violations", [])),
+                "A required operational check could not be completed.",
+            ),
+            "warnings": _presentation_findings(
+                result.get("warnings", []),
+                "A non-blocking operational risk was found.",
+            ),
         }
 
     warnings = [*state.warnings, *_safe_map_warnings(result, tool)]

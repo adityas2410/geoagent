@@ -273,6 +273,7 @@ class ObjectiveDecisionRunner:
         self.service: MissionService | None = None
         self.calls = 0
         self.feasible_after_acceptance = feasible_after_acceptance
+        self.replan_started_state: MissionRecord | None = None
 
     async def run_async(self, *, user_id, session_id, new_message, run_config):
         self.calls += 1
@@ -289,6 +290,9 @@ class ObjectiveDecisionRunner:
             )
             text = "Objective decision requested."
         else:
+            self.replan_started_state = await self.service.require_mission(
+                user_id, session_id
+            )
             seed_required_plan_evidence(self.service, user_id, session_id)
             await self.service.publish_plan(
                 user_id,
@@ -630,7 +634,13 @@ class MissionServiceTest(unittest.IsolatedAsyncioTestCase):
                         "duration_seconds": 900,
                     }
                 ],
-                "warnings": [],
+                "warnings": [
+                    {
+                        "code": "MULTIPLE_GEOCODE_MATCHES",
+                        "message": "The destination matched more than one map location.",
+                        "location_id": "STOP-1",
+                    }
+                ],
                 "errors": [],
             },
         )
@@ -666,8 +676,15 @@ class MissionServiceTest(unittest.IsolatedAsyncioTestCase):
             "validate_plan",
             {
                 "status": "success",
-                "feasible": True,
-                "hard_violations": [],
+                "feasible": False,
+                "hard_violations": [
+                    {
+                        "code": "DRIVER_BREAK_REQUIRED",
+                        "constraint_id": "RULE-002",
+                        "details": {"continuous_minutes": 270},
+                        "message": "The resource exceeds its continuous-work limit without the required break.",
+                    }
+                ],
                 "warnings": [{"code": "WEATHER", "message": "Monitor rain."}],
             },
         )
@@ -687,11 +704,20 @@ class MissionServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.routes[0].encoded_polyline, "encoded-route")
         self.assertEqual(state.assignments[0].resource_id, "VEH-1")
         self.assertEqual(state.metrics, {"task_count": 1})
-        self.assertTrue(state.validation["feasible"])
+        self.assertFalse(state.validation["feasible"])
+        self.assertEqual(
+            state.validation["hard_violations"],
+            [{"message": "The resource exceeds its continuous-work limit without the required break."}],
+        )
+        self.assertEqual(state.validation["warnings"], [{"message": "Monitor rain."}])
+        self.assertIn({"message": "The destination matched more than one map location."}, state.warnings)
         self.assertGreaterEqual(state.revision, 5)
         serialized_map = str(state.model_dump(mode="json"))
         self.assertNotIn("must-not-appear", serialized_map)
         self.assertNotIn("omit-me", serialized_map)
+        self.assertNotIn("DRIVER_BREAK_REQUIRED", serialized_map)
+        self.assertNotIn("RULE-002", serialized_map)
+        self.assertNotIn("continuous_minutes", serialized_map)
 
         completed = await self.service.publish_plan(
             self.workspace.workspace_id,
@@ -874,6 +900,11 @@ class MissionServiceTest(unittest.IsolatedAsyncioTestCase):
         waiting = await service.run_mission(workspace.workspace_id, mission.mission_id)
         self.assertEqual(waiting.status, "awaiting_objective_decision")
         self.assertEqual(waiting.objective_decision.status, "pending")
+        seed_required_plan_evidence(service, workspace.workspace_id, mission.mission_id)
+        key = (workspace.workspace_id, mission.mission_id)
+        service.store.missions[key] = service.store.missions[key].model_copy(
+            update={"plan": {"old_assignment": "must-not-survive-into-replan"}}
+        )
 
         completed = await service.accept_objective_decision(
             workspace.workspace_id, mission.mission_id
@@ -889,6 +920,9 @@ class MissionServiceTest(unittest.IsolatedAsyncioTestCase):
             completed.objective,
             "Complete highest-priority work within available capacity.",
         )
+        self.assertIsNotNone(runner.replan_started_state)
+        self.assertIsNone(runner.replan_started_state.plan)
+        self.assertEqual(runner.replan_started_state.map_state.assignments, [])
 
     async def test_second_infeasible_attempt_stops_and_discard_deletes_mission(self) -> None:
         runner = ObjectiveDecisionRunner(feasible_after_acceptance=False)

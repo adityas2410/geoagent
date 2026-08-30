@@ -180,6 +180,27 @@ class PlanningToolsTest(unittest.TestCase):
         self.assertIn("cold_chain_certified", paired["capabilities"])
         self.assertEqual(paired["max_work_minutes"], 240)
 
+    def test_unmodeled_policy_uses_its_source_description_not_an_internal_name(self) -> None:
+        result = validate_plan(
+            {"assignments": []},
+            [],
+            [],
+            [
+                {
+                    "constraint_id": "rule-99",
+                    "kind": "source_defined_policy",
+                    "description": "Keep one loading bay available for emergencies.",
+                }
+            ],
+            CONTEXT,
+        )
+
+        self.assertEqual(
+            result["hard_violations"][0]["message"],
+            "Required policy cannot be evaluated: Keep one loading bay available for emergencies.",
+        )
+        self.assertEqual(result["hard_violations"][0]["code"], "UNSUPPORTED_HARD_CONSTRAINT")
+
     def test_validator_enforces_cold_chain_break_concurrency_and_return_rules(self) -> None:
         extended_end = START + timedelta(hours=10)
         first_end = START + timedelta(hours=3)

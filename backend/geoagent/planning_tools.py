@@ -504,7 +504,11 @@ def _unsupported_hard_constraints(
         {
             "code": "UNSUPPORTED_HARD_CONSTRAINT",
             "constraint_id": item.constraint_id,
-            "message": "An essential operational policy could not be modeled for this plan.",
+            "message": (
+                f"Required policy cannot be evaluated: {item.description.strip()}"
+                if item.description and item.description.strip()
+                else "A required operational policy cannot be evaluated for this plan."
+            ),
         }
         for item in constraints
         if item.severity == "hard" and item.kind not in SUPPORTED_CONSTRAINTS

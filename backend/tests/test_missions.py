@@ -200,6 +200,17 @@ class InMemoryMissionStore:
         )
         await self.append_event(workspace_id, event)
 
+    async def update_mission(
+        self, workspace_id: str, mission_id: str, changes: dict
+    ) -> None:
+        key = (workspace_id, mission_id)
+        current = self.missions.get(key)
+        if current is None:
+            raise MissionError("MISSION_NOT_FOUND", "The Mission was not found.", 404)
+        self.missions[key] = MissionRecord.model_validate(
+            {**current.model_dump(mode="python"), **changes}
+        )
+
     async def list_events(
         self, workspace_id: str, mission_id: str
     ) -> list[MissionEventRecord]:
@@ -512,7 +523,7 @@ class MissionServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(waiting.status, "awaiting_input")
         self.assertEqual(waiting.clarification.status, "open")
-        self.assertEqual(self.service.runner.run_configs[0].max_llm_calls, 30)
+        self.assertEqual(self.service.runner.run_configs[0].max_llm_calls, 100)
 
         with self.assertRaises(MissionError) as raised:
             await self.service.run_mission(self.workspace.workspace_id, mission.mission_id)
@@ -528,7 +539,7 @@ class MissionServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed.name, "Tomorrow's Operations")
         self.assertEqual(len(self.service.runner.run_configs), 2)
         self.assertTrue(
-            all(config.max_llm_calls == 30 for config in self.service.runner.run_configs)
+            all(config.max_llm_calls == 100 for config in self.service.runner.run_configs)
         )
 
         with self.assertRaises(MissionError) as raised:
@@ -832,6 +843,15 @@ class MissionServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             delegated_specialists,
             [specialist for specialist, _tool in runner.specialist_sequence],
+        )
+        self.assertEqual(len(completed.run_metrics), 1)
+        self.assertEqual(
+            completed.run_metrics[-1].specialist_delegations,
+            len(runner.specialist_sequence),
+        )
+        self.assertEqual(
+            completed.run_metrics[-1].tool_calls,
+            len(runner.specialist_sequence),
         )
         serialized = " ".join(str(item.model_dump(mode="json")) for item in events)
         self.assertNotIn("hidden specialist reasoning", serialized)

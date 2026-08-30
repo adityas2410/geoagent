@@ -20,10 +20,14 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from .data_sources.source_manager import DataSourceService
 from .data_sources.source_manager import get_data_source_service
+from .model_fallback import activate_run_metrics
+from .model_fallback import activate_run_activity
+from .model_fallback import reset_run_activity
+from .model_fallback import reset_run_metrics
 
 
 APP_NAME = "geoagent"
-DEFAULT_MAX_LLM_CALLS = 30
+DEFAULT_MAX_LLM_CALLS = 100
 SPECIALIST_AGENT_NAMES = frozenset(
     {
         "organizational_data_agent",
@@ -51,6 +55,7 @@ class _AgentActivityProjection:
     delegations: list[_SpecialistDelegation] = field(default_factory=list)
     processed_event_ids: set[str] = field(default_factory=set)
     map_state: "MissionMapState | None" = None
+    run_metrics: dict[str, Any] | None = None
 
     def begin_event(self, event_id: str) -> bool:
         if event_id in self.processed_event_ids:
@@ -273,6 +278,27 @@ class MissionMapState(BaseModel):
     warnings: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class MissionRunMetrics(BaseModel):
+    """Developer-facing counters for one isolated Mission execution."""
+
+    run_id: str
+    started_at: datetime
+    updated_at: datetime
+    llm_requests: int = 0
+    fallback_requests: int = 0
+    tool_calls: int = 0
+    specialist_delegations: int = 0
+    llm_requests_by_agent: dict[str, int] = Field(default_factory=dict)
+    model_requests: dict[str, int] = Field(default_factory=dict)
+    model_failures: dict[str, int] = Field(default_factory=dict)
+    input_tokens: int = 0
+    output_tokens: int = 0
+    thinking_tokens: int = 0
+    cached_input_tokens: int = 0
+    tool_use_prompt_tokens: int = 0
+    total_tokens: int = 0
+
+
 class MissionRecord(BaseModel):
     """Complete product-facing state saved for one Mission."""
 
@@ -289,6 +315,7 @@ class MissionRecord(BaseModel):
     objective_decision: ObjectiveDecisionState | None = None
     plan: dict[str, Any] | None = None
     map_state: MissionMapState | None = None
+    run_metrics: list[MissionRunMetrics] = Field(default_factory=list)
     error: str | None = None
     created_at: datetime
     updated_at: datetime
@@ -697,6 +724,12 @@ class MissionStore(Protocol):
         """Atomically save a visible event and the map state it produced."""
         ...
 
+    async def update_mission(
+        self, workspace_id: str, mission_id: str, changes: dict[str, Any]
+    ) -> None:
+        """Persist non-lifecycle Mission state such as live run counters."""
+        ...
+
     async def list_events(
         self, workspace_id: str, mission_id: str
     ) -> list[MissionEventRecord]:
@@ -891,6 +924,12 @@ class FirestoreMissionStore:
         )
         await batch.commit()
 
+    async def update_mission(
+        self, workspace_id: str, mission_id: str, changes: dict[str, Any]
+    ) -> None:
+        """Update one existing Mission without creating an activity event."""
+        await self._mission_ref(workspace_id, mission_id).update(changes)
+
     async def list_events(
         self, workspace_id: str, mission_id: str
     ) -> list[MissionEventRecord]:
@@ -957,6 +996,39 @@ class MissionService:
         self.runner = runner
         self.data_source_service = data_source_service
         self.run_config = RunConfig(max_llm_calls=max_llm_calls)
+
+    @staticmethod
+    def _new_run_metrics(mission: MissionRecord, timestamp: datetime) -> list[dict[str, Any]]:
+        """Append one fresh counter set for each explicit Mission execution."""
+        metrics = MissionRunMetrics(
+            run_id=f"run_{uuid4().hex}", started_at=timestamp, updated_at=timestamp
+        )
+        return [
+            *(item.model_dump(mode="python") for item in mission.run_metrics),
+            metrics.model_dump(mode="python"),
+        ]
+
+    async def _persist_run_metrics(
+        self, mission: MissionRecord, metrics: dict[str, Any]
+    ) -> None:
+        """Persist one run's safe counters without adding noisy activity rows."""
+        persisted = MissionRunMetrics.model_validate(metrics).model_copy(
+            update={"updated_at": _now()}
+        )
+        metrics.clear()
+        metrics.update(persisted.model_dump(mode="python"))
+        current = await self.require_mission(mission.workspace_id, mission.mission_id)
+        run_metrics = [
+            persisted if item.run_id == persisted.run_id else item
+            for item in current.run_metrics
+        ]
+        if not any(item.run_id == persisted.run_id for item in run_metrics):
+            run_metrics.append(persisted)
+        await self.store.update_mission(
+            mission.workspace_id,
+            mission.mission_id,
+            {"run_metrics": [item.model_dump(mode="python") for item in run_metrics]},
+        )
 
     async def create_workspace(self, request: WorkspaceCreate) -> WorkspaceRecord:
         """Create the container that owns sources and Missions."""
@@ -1444,7 +1516,12 @@ class MissionService:
             workspace_id,
             mission_id,
             {"created"},
-            {"status": "running", "started_at": timestamp, "updated_at": timestamp},
+            {
+                "status": "running",
+                "started_at": timestamp,
+                "updated_at": timestamp,
+                "run_metrics": self._new_run_metrics(mission, timestamp),
+            },
             _event(mission_id, "mission_started", created_at=timestamp),
         )
         return await self._run_agent(mission, mission.objective)
@@ -1473,6 +1550,7 @@ class MissionService:
                 "status": "running",
                 "clarification": clarification.model_dump(mode="python"),
                 "updated_at": timestamp,
+                "run_metrics": self._new_run_metrics(mission, timestamp),
             },
             _event(
                 mission_id,
@@ -1528,7 +1606,13 @@ class MissionService:
                 "objective_history": [item.model_dump(mode="python") for item in history],
                 "objective_decision": accepted.model_dump(mode="python"),
                 "summary": None,
+                # Previous attempts remain in the event history, but their
+                # plan/map projection must not be presented as this replan's
+                # live operational result.
+                "plan": None,
+                "map_state": MissionMapState(updated_at=timestamp).model_dump(mode="python"),
                 "updated_at": timestamp,
+                "run_metrics": self._new_run_metrics(mission, timestamp),
             },
             _event(
                 mission_id,
@@ -1565,7 +1649,31 @@ class MissionService:
 
     async def _run_agent(self, mission: MissionRecord, message: str) -> MissionRecord:
         """Run the manager until it completes, pauses, or fails."""
-        activity = _AgentActivityProjection()
+        if not mission.run_metrics:
+            raise RuntimeError("Mission execution started without run metrics")
+        metrics = mission.run_metrics[-1].model_dump(mode="python")
+        activity = _AgentActivityProjection(run_metrics=metrics)
+        metrics_token = activate_run_metrics(metrics)
+
+        async def record_model_activity(agent: str, model: str, phase: str) -> None:
+            event_type = {
+                "started": "model_requested",
+                "completed": "model_completed",
+                "failed": "model_failed",
+            }.get(phase)
+            if event_type is None:
+                return
+            await self.store.append_event(
+                mission.workspace_id,
+                _event(
+                    mission.mission_id,
+                    event_type,
+                    agent=agent,
+                    payload={"model": model},
+                ),
+            )
+
+        activity_token = activate_run_activity(record_model_activity)
         try:
             content = types.Content(
                 role="user", parts=[types.Part.from_text(text=message)]
@@ -1582,6 +1690,15 @@ class MissionService:
             return await self._fail_running_mission(
                 mission, "The Mission Manager run failed."
             )
+        finally:
+            reset_run_activity(activity_token)
+            reset_run_metrics(metrics_token)
+            try:
+                await self._persist_run_metrics(mission, metrics)
+            except Exception:
+                logger.exception(
+                    "Mission run metrics could not be saved for %s", mission.mission_id
+                )
 
         current = await self.require_mission(mission.workspace_id, mission.mission_id)
         if current.status == "running":
@@ -1637,6 +1754,15 @@ class MissionService:
         ) -> None:
             nonlocal index
             safe_payload = payload or {}
+            if activity.run_metrics is not None:
+                if event_type == "tool_called":
+                    activity.run_metrics["tool_calls"] = (
+                        int(activity.run_metrics.get("tool_calls", 0)) + 1
+                    )
+                elif event_type == "task_delegated":
+                    activity.run_metrics["specialist_delegations"] = (
+                        int(activity.run_metrics.get("specialist_delegations", 0)) + 1
+                    )
             projected = _event(
                 mission.mission_id,
                 event_type,
@@ -1780,6 +1906,8 @@ class MissionService:
                 agent=event.author or None,
                 payload={"changes": _safe_value(event.actions.state_delta)},
             )
+        if activity.run_metrics is not None:
+            await self._persist_run_metrics(mission, activity.run_metrics)
 
 
 _mission_service: MissionService | None = None

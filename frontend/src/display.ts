@@ -55,10 +55,8 @@ const lifecycleEventTypes = new Set([
   "objective_decision_requested",
   "objective_revision_accepted",
   "plan_published",
+  "mission_completed",
   "mission_failed",
-  "model_requested",
-  "model_completed",
-  "model_failed",
 ]);
 
 export const statusLabel = (status: MissionStatus) =>
@@ -150,6 +148,7 @@ export function describeEvent(event: MissionEvent): string {
   }
   if (event.type === "agent_message") return String(event.payload.text || "Reported an update");
   if (event.type === "plan_published") return "Published the operational plan";
+  if (event.type === "mission_completed") return "Mission completed";
   if (event.type === "mission_started") return "Mission execution started";
   if (event.type === "mission_created") return "Mission created";
   if (event.type === "clarification_requested") return "Requested clarification";

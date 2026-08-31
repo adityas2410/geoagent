@@ -97,6 +97,44 @@ python backend/demo_data/build_demo_db.py --planning-date 2026-08-25
 
 The generated `backend/data/geoagent_demo.db` is intentionally gitignored. Its committed schema and builder contain synthetic organizational records only; routes and Mission outputs are produced by GeoAgent rather than stored in the source database.
 
+### Relational data source depth
+
+The Kerala demonstration is intentionally not a flat CSV or a pre-solved route
+fixture. It is a normalized operational SQLite database with nine related
+tables, foreign-key relationships, domain checks, and indexes. The table
+structure forces GeoAgent to discover the organization before it can plan:
+
+| Table | Operational data it contributes |
+|---|---|
+| `dataset_metadata` | Dataset provenance, planning date, and timezone. |
+| `locations` | Depot/customer names, complete address components, coordinate provenance, and access instructions. Coordinates begin unresolved so the Geospatial Agent must resolve operational locations rather than receiving pre-seeded map points. |
+| `facilities` | Depot location, opening hours, loading-bay concurrency, and default service time. |
+| `customers` | Customer type, customer-to-location relationship, and service-time defaults. |
+| `vehicles` | Vehicle class, home facility, weight/volume capacity, refrigeration capability, route limit, and active status. |
+| `drivers` | License class, cold-chain certification, home facility, maximum shift duration, and active status. |
+| `resource_availability` | Time-bounded vehicle maintenance and driver leave/availability records, linked separately to either a vehicle or a driver. |
+| `delivery_jobs` | Pending work queue: pickup and delivery locations, date, priority, weight, volume, time window, service duration, refrigeration need, vehicle-class requirement, and special instructions. |
+| `operational_rules` | Organization/facility-scoped hard constraints and warnings, including breaks, loading concurrency, cold-chain certification, zero delivery-window grace, utilization targets, and fleet-use preference. |
+
+The meaningful planning facts are distributed across these tables. For example,
+a feasible refrigerated delivery requires correlating a pending job's weight,
+volume, time window, delivery location, and cold-chain requirement with a
+vehicle's capacity/class/refrigeration flag, a driver's certification and shift
+limit, their individual availability records, the depot's loading capacity, and
+the applicable operational rules. The result is a genuine multi-constraint
+planning problem, not a single-table lookup.
+
+The **Organizational Data Agent** first calls `list_authorized_sources` and
+`inspect_source_schema` to inspect permitted entities, fields, types, and
+relationships at runtime. It then uses `query_source` for bounded, read-only
+data retrieval: selected columns, filters, aggregates, ordering, and
+pagination. GeoAgent's SQLite adapter compiles these validated query
+specifications into parameterized `SELECT` statements. Raw SQL, writes, and
+unbounded access are rejected; the Planning Agent receives only the
+Mission-authorized operational facts it needs to optimize and validate the
+plan. This keeps the architecture database-agnostic while making the Kerala
+demo's relational complexity visible and auditable.
+
 ## Reproducible testing
 
 The automated test suite uses fakes for Firestore, ADK, Gemini, and Google Maps

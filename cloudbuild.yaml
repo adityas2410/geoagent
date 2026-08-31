@@ -1,0 +1,22 @@
+# Produces the single Cloud Run image from the local repository. The browser
+# Maps key is intentionally a build input: it is public in the shipped SPA and
+# must be referrer-restricted in Google Maps Platform.
+steps:
+  - name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    secretEnv:
+      - VITE_GOOGLE_MAPS_API_KEY
+    args:
+      - -ceu
+      - |
+        docker build \
+          --build-arg VITE_API_BASE_URL= \
+          --build-arg VITE_GOOGLE_MAPS_API_KEY="$$VITE_GOOGLE_MAPS_API_KEY" \
+          --tag us-central1-docker.pkg.dev/$PROJECT_ID/geoagent/geoagent:$BUILD_ID \
+          .
+images:
+  - us-central1-docker.pkg.dev/$PROJECT_ID/geoagent/geoagent:$BUILD_ID
+availableSecrets:
+  secretManager:
+    - versionName: projects/$PROJECT_ID/secrets/geoagent-browser-maps-api-key/versions/latest
+      env: VITE_GOOGLE_MAPS_API_KEY

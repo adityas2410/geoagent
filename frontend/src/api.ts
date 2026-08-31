@@ -9,7 +9,9 @@ import type {
   WorkspaceQuestionHistoryMessage,
 } from "./types";
 
-const baseUrl = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(
+// Production serves the command center and API from the same Cloud Run origin.
+// Local Vite development retains its explicit localhost fallback.
+const baseUrl = (import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000").replace(
   /\/$/,
   "",
 );

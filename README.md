@@ -94,6 +94,56 @@ POST /api/workspaces/{workspace_id}/missions/{mission_id}/run
 During backend testing, these production endpoints are called directly. The
 frontend uses both operations when the user presses **Start Mission**.
 
+## Cloud Run deployment
+
+Production uses one Cloud Run service. Its container builds the Vite command
+center and serves it from FastAPI, so the browser UI and `/api/*` share one
+origin and deploy atomically in one revision.
+
+### Production services
+
+| Google Cloud service | GeoAgent responsibility |
+|---|---|
+| Cloud Run | Runs the single public FastAPI + React container. |
+| Cloud Build | Builds the container from the current local repository source. |
+| Artifact Registry | Stores immutable Cloud Run container images. |
+| Firestore Native (`geoagentdb`) | Stores Workspaces, Missions, plans, safe events, and ADK sessions. |
+| Cloud Storage | Stores uploaded SQLite organizational sources durably. |
+| Secret Manager | Injects the server-side Gemini and Maps credentials; values are never committed. |
+| Cloud Logging | Captures deployment and runtime logs for operational evidence. |
+| IAM service account | Gives the Cloud Run revision only its Firestore, source-bucket, and required-secret access. |
+
+The deployed application calls Gemini through Google ADK and calls Google Maps
+Platform APIs for browser maps and mission-specific geospatial work. Browser
+and server Maps keys are separate: the browser key is referrer- and API-
+restricted, while the server key is stored only in Secret Manager and limited
+to the backend APIs it calls.
+
+The deployed service requires these non-secret environment settings:
+
+- `GOOGLE_CLOUD_PROJECT=geoagent-hackathon`
+- `FIRESTORE_DATABASE_ID=geoagentdb`
+- `GEOAGENT_SOURCE_STORAGE=gcs`
+- `GEOAGENT_SOURCE_BUCKET=<production bucket>`
+- `GEOAGENT_CORS_ORIGINS=<Cloud Run service origin>`
+
+`GOOGLE_API_KEY` and the server-side `GOOGLE_MAPS_API_KEY` must be attached
+from Secret Manager. The frontend uses a separate `VITE_GOOGLE_MAPS_API_KEY` at
+image-build time; it is necessarily browser-visible and must be restricted to
+the deployed HTTPS referrer. Use an empty `VITE_API_BASE_URL` for the
+single-service deployment so browser requests remain same-origin.
+
+The Cloud Run service account needs least-privilege access to the named
+Firestore database, the source bucket, and the attached Secret Manager secrets.
+It must not use a local source directory in production. Cloud Run logs are the
+deployment and runtime evidence; Scheduler and Trace are not required for the
+current feature set.
+
+`Dockerfile` defines the combined application image and `cloudbuild.yaml`
+builds it from local source. A normal release builds a new immutable image in
+Cloud Build and deploys that image as the next Cloud Run revision; the public
+service URL remains stable and Cloud Run retains prior revisions for rollback.
+
 ### Clarification and impossible-Mission decisions
 
 The Mission Manager starts by loading the Mission. If the objective is genuinely

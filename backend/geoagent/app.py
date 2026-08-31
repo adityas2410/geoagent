@@ -19,6 +19,7 @@ from fastapi import Form
 from fastapi import HTTPException
 from fastapi import Response
 from fastapi import UploadFile
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from starlette.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
@@ -425,3 +426,30 @@ async def list_mission_events(
         return {"events": await service.list_events(workspace_id, mission_id)}
     except MissionError as error:
         raise_mission_http_error(error)
+
+
+def _frontend_directory() -> Path:
+    """Return the optional, container-provided Vite build directory."""
+    configured = os.getenv("GEOAGENT_FRONTEND_DIRECTORY", "").strip()
+    if configured:
+        return Path(configured).resolve()
+    return Path(__file__).resolve().parents[1] / "frontend_dist"
+
+
+_frontend_build_directory = _frontend_directory()
+_frontend_index = _frontend_build_directory / "index.html"
+
+
+if _frontend_index.is_file():
+
+    @app.get("/{frontend_path:path}", include_in_schema=False)
+    def serve_frontend(frontend_path: str) -> FileResponse:
+        """Serve the Vite single-page app without intercepting API routes."""
+        requested = (_frontend_build_directory / frontend_path).resolve()
+        try:
+            requested.relative_to(_frontend_build_directory)
+        except ValueError:
+            return FileResponse(_frontend_index)
+        if frontend_path and requested.is_file():
+            return FileResponse(requested)
+        return FileResponse(_frontend_index)

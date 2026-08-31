@@ -13,7 +13,7 @@ describe("Ask GeoAgent", () => {
 
   it("opens, sends, renders evidence, and preserves conversation when minimized", async () => {
     vi.spyOn(api, "askWorkspace").mockResolvedValue({
-      answer: "Dispatch is running.",
+      answer: "## Dispatch\n\n**Running** with `2` resources.",
       references: [{ mission_id: "msn_1", mission_name: "Dispatch", event_ids: ["evt_1"] }],
     });
     render(<AskGeoAgent workspaceId="ws_1" workspaceName="Operations" />);
@@ -24,12 +24,14 @@ describe("Ask GeoAgent", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Send question" }));
 
-    expect(await screen.findByText("Dispatch is running.")).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Dispatch" })).toBeTruthy();
+    expect(screen.getByText("Running").tagName).toBe("STRONG");
+    expect(screen.getByText("2").tagName).toBe("CODE");
     expect(screen.getByText("Dispatch · 1 event")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Minimize Ask GeoAgent" }));
-    expect(screen.queryByText("Dispatch is running.")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Dispatch" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Open Ask GeoAgent" }));
-    expect(screen.getByText("Dispatch is running.")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Dispatch" })).toBeTruthy();
   });
 
   it("shows loading, prevents duplicate sends, and submits Enter", async () => {

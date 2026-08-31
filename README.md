@@ -6,6 +6,8 @@ hosted by **Google**. GeoAgent uses Gemini, Google's Agent Development Kit
 
 **GeoAgent** is an autonomous multi-agent system for planning and coordinating real-world operations using organizational data and live geospatial intelligence.
 
+Watch the unlisted [four-minute demo on YouTube](https://www.youtube.com/watch?v=w4wndRSoRxc).
+
 ## Problem and value proposition
 
 Operational teams have data scattered across business systems, but turning it
@@ -34,6 +36,52 @@ python backend/demo_data/build_demo_db.py --planning-date 2026-08-25
 ```
 
 The generated `backend/data/geoagent_demo.db` is intentionally gitignored. Its committed schema and builder contain synthetic organizational records only; routes and Mission outputs are produced by GeoAgent rather than stored in the source database.
+
+## Reproducible testing
+
+The automated test suite uses fakes for Firestore, ADK, Gemini, and Google Maps
+responses, so it can be run without cloud credentials or API keys. From a clean
+clone, use Python 3.11+ and Node.js 20+:
+
+```bash
+cd backend
+python -m venv .venv
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+# macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+python -m unittest discover -s tests
+```
+
+Build and test the command center independently:
+
+```bash
+cd frontend
+pnpm install
+pnpm test
+pnpm build
+```
+
+To reproduce the complete local Kerala demonstration, generate the synthetic
+database, copy `backend/.env.example` to `backend/.env`, and supply valid
+`GOOGLE_API_KEY` and `GOOGLE_MAPS_API_KEY` values. Then start the API and
+frontend in separate terminals:
+
+```bash
+# Terminal 1
+cd backend
+uvicorn geoagent.app:app --reload
+
+# Terminal 2
+cd frontend
+copy .env.example .env.local
+pnpm dev
+```
+
+Open `http://localhost:5173`, create a Workspace, upload
+`backend/data/geoagent_demo.db`, and start a Mission such as `Plan tomorrow's
+deliveries.` The UI records the real agent actions, tool outcomes, map state,
+and final plan through the same API used in production.
 
 ## Frontend command center
 

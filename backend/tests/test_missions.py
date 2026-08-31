@@ -774,6 +774,46 @@ class MissionServiceTest(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(empty_raised.exception.code, "OPERATIONAL_DATA_INCOMPLETE")
 
+    async def test_publish_blocks_physical_assignments_marked_not_applicable(self) -> None:
+        mission = await self.service.create_mission(
+            self.workspace.workspace_id,
+            MissionCreate(objective="Plan physical operational work."),
+        )
+        key = (self.workspace.workspace_id, mission.mission_id)
+        running = mission.model_copy(update={"status": "running"})
+        state = running.map_state.model_copy(
+            update={
+                "availability": MissionMapAvailability(
+                    assignments="available", metrics="available", validation="available"
+                ),
+                "assignments": [
+                    MissionMapAssignment(
+                        task_id="TASK-1",
+                        resource_id="RESOURCE-1",
+                        sequence=1,
+                        origin_location_id="DEPOT",
+                        destination_location_id="CUSTOMER",
+                    )
+                ],
+                "metrics": {"assigned_task_count": 1},
+                "validation": {"feasible": True, "hard_violations": [], "warnings": []},
+            }
+        )
+        self.service.store.missions[key] = running.model_copy(update={"map_state": state})
+
+        with self.assertRaises(MissionError) as raised:
+            await self.service.publish_plan(
+                self.workspace.workspace_id,
+                mission.mission_id,
+                mission.adk_session_id,
+                "Physical Plan",
+                "This cannot publish without map evidence.",
+                {"result": "unsupported"},
+                NON_GEOGRAPHIC_REQUIREMENTS,
+            )
+
+        self.assertEqual(raised.exception.code, "OPERATIONAL_DATA_INCOMPLETE")
+
     async def test_publish_persists_not_applicable_reasons(self) -> None:
         mission = await self.service.create_mission(
             self.workspace.workspace_id,

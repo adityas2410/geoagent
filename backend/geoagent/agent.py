@@ -13,9 +13,7 @@ from pydantic import BaseModel, Field
 from .data_sources.organizational_data_tools import inspect_source_schema
 from .data_sources.organizational_data_tools import list_authorized_sources
 from .data_sources.organizational_data_tools import query_source
-from .geospatial_tools import GeospatialJourney
 from .geospatial_tools import LocationReference
-from .geospatial_tools import PlanningWindow
 from .geospatial_tools import compute_route_matrix
 from .geospatial_tools import compute_routes
 from .geospatial_tools import geocode_locations
@@ -75,8 +73,11 @@ class GeospatialRequest(BaseModel):
 
     objective: str
     locations: list[LocationReference] = Field(default_factory=list)
-    journeys: list[GeospatialJourney] = Field(default_factory=list)
-    planning_window: PlanningWindow | None = None
+    # Keep ADK delegation input JSON-native. The Maps tools validate ISO dates
+    # themselves; parsing them here turns strings into datetime objects that
+    # ADK's workflow handoff attempts to json.dumps without a serializer.
+    journeys: list[dict[str, Any]] = Field(default_factory=list)
+    planning_window: dict[str, str] | None = None
     questions: list[str] = Field(default_factory=list)
     constraints: list[dict[str, Any]] = Field(default_factory=list)
 

@@ -15,6 +15,29 @@ const browserMapsKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | unde
 
 let loader: Loader | undefined;
 
+function resourceIdForRoute(route: MapRoute, assignments: MapAssignment[]): string | null {
+  if (route.resource_id) return route.resource_id;
+  if (!route.destination_location_id) return null;
+  const matchingResources = new Set(
+    assignments
+      .filter((assignment) =>
+        assignment.destination_location_id === route.destination_location_id
+        && (!route.origin_location_id || assignment.origin_location_id === route.origin_location_id),
+      )
+      .map((assignment) => assignment.resource_id),
+  );
+  return matchingResources.size === 1 ? [...matchingResources][0] : null;
+}
+
+export function routesForSelectedResource(
+  routes: MapRoute[],
+  assignments: MapAssignment[],
+  resourceId: string | null | undefined,
+): MapRoute[] {
+  if (!resourceId) return routes;
+  return routes.filter((route) => resourceIdForRoute(route, assignments) === resourceId);
+}
+
 export function MapCanvas({
   locations,
   routes = [],
@@ -48,6 +71,7 @@ export function MapCanvas({
           mapTypeControl: false,
           streetViewControl: false,
           colorScheme: maps.ColorScheme?.DARK,
+          internalUsageAttributionIds: ["gmp_git_agentskills_v1"],
         });
         setState("ready");
       })
@@ -66,7 +90,6 @@ export function MapCanvas({
     overlays.current = [];
 
     const locationsById = new Map(locations.map((location) => [location.location_id, location]));
-    const assignmentByTask = new Map(assignments.map((assignment) => [assignment.task_id, assignment]));
     const bounds = new maps.LatLngBounds();
     locations.forEach((location, index) => {
       const marker = new maps.Marker({
@@ -80,14 +103,12 @@ export function MapCanvas({
       bounds.extend(marker.getPosition());
     });
 
-    routes.forEach((route) => {
+    const visibleRoutes = routesForSelectedResource(routes, assignments, highlightedResourceId);
+    visibleRoutes.forEach((route) => {
       if (!route.encoded_polyline) return;
-      const routeAssignment = [...assignmentByTask.values()].find(
-        (assignment) => assignment.resource_id === route.resource_id,
-      );
-      const highlighted = Boolean(
-        highlightedResourceId && route.resource_id && route.resource_id === highlightedResourceId,
-      );
+      const routeResourceId = resourceIdForRoute(route, assignments);
+      const routeAssignment = assignments.find((assignment) => assignment.resource_id === routeResourceId);
+      const highlighted = Boolean(highlightedResourceId && routeResourceId === highlightedResourceId);
       const path = maps.geometry?.encoding?.decodePath(route.encoded_polyline);
       if (!path) return;
       const polyline = new maps.Polyline({

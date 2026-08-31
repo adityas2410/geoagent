@@ -1,0 +1,39 @@
+Incident date: 2026-08-31 UTC
+Source: Cloud Run stderr, project geoagent-hackathon, service geoagent,
+revision geoagent-00006-58m.
+
+Affected workspace: ws_d86d011f0a7e4f71a3ab20fb4e1554a5
+Affected Mission: msn_d574032a34cf46428ff82d7556f031e6
+
+Observed errors:
+- 2026-08-31T11:51:04.289560Z
+- 2026-08-31T11:51:24.029837Z
+
+Failure:
+TypeError: Object of type datetime is not JSON serializable
+
+The exception occurs inside Google ADK workflow input preparation:
+google.adk.workflow._llm_agent_wrapper._node_input_to_content calls
+json.dumps(node_input) before an LLM-agent node runs.
+
+Interpretation:
+This is an observed backend ADK error, not a confirmed user-visible Mission
+failure. The UI did not report a failure, and subsequent Cloud Run logs showed
+normal Mission polling plus a Gemini request. A datetime object may be supplied
+in delegated workflow/node input; if this error is later shown to interrupt the
+Mission, it must be converted to an ISO-8601 string (or another JSON-safe
+value) before it is included in ADK workflow input/state.
+
+Evidence after the errors:
+Cloud Run continued returning HTTP 200 for this Mission's GET state, map, and
+events polling endpoints. Those successful polling requests do not prove that
+the Mission planning run completed; inspect the Mission document status and
+safe events before changing Firestore for any visual comparison.
+
+Next steps:
+1. Treat this as a diagnostic observation unless the UI or final Mission state
+   confirms a failure.
+2. If it does, identify the datetime-bearing field injected into the ADK
+   workflow input and normalize it before delegation; add a regression test.
+3. Only after preserving confirmed evidence, use the existing complete
+   reference map state for the requested visual comparison.

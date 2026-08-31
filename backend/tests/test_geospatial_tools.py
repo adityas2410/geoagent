@@ -445,6 +445,12 @@ class GeospatialToolsTest(unittest.TestCase):
             }
         )
         self.assertEqual(request.locations[0].reference_id, "LOC-1")
+        serialized_request = request.model_dump(mode="json")
+        self.assertEqual(
+            serialized_request["planning_window"]["start_at"],
+            "2026-08-28T06:30:00+05:30",
+        )
+        self.assertIsInstance(serialized_request["journeys"][0], dict)
         findings = GeospatialFindings.model_validate(
             {
                 "resolved_locations": [],

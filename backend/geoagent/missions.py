@@ -673,6 +673,31 @@ def _final_map_state_with_requirements(
     return _final_map_state(prepared, timestamp)
 
 
+def _physical_assignments_require_map_evidence(state: MissionMapState) -> bool:
+    """Prevent a manager from declaring map data irrelevant for physical work.
+
+    Assignment tool results are persisted before publication. If an assignment
+    names either end of a journey, locations and routes are operational facts,
+    not optional prose the manager may mark ``not_applicable``.
+    """
+    return any(
+        assignment.origin_location_id or assignment.destination_location_id
+        for assignment in state.assignments
+    )
+
+
+def _requirements_for_persisted_work(
+    requirements: OperationalDataRequirements, state: MissionMapState
+) -> OperationalDataRequirements:
+    """Promote geospatial requirements when saved assignments prove travel."""
+    if not _physical_assignments_require_map_evidence(state):
+        return requirements
+    required = OperationalDataRequirement(status="required")
+    return requirements.model_copy(
+        update={"locations": required, "routes": required}
+    )
+
+
 class MissionStore(Protocol):
     """Storage operations needed by the Mission lifecycle."""
 
@@ -1497,8 +1522,12 @@ class MissionService:
             )
         timestamp = _now()
         current = await self.require_mission(workspace_id, mission_id)
+        current_map_state = self._map_state_for(current)
+        enforced_requirements = _requirements_for_persisted_work(
+            operational_data_requirements, current_map_state
+        )
         map_state = _final_map_state_with_requirements(
-            self._map_state_for(current), operational_data_requirements, timestamp
+            current_map_state, enforced_requirements, timestamp
         )
         return await self.store.transition_mission(
             workspace_id,
@@ -1522,7 +1551,7 @@ class MissionService:
                 payload={
                     "mission_name": mission_name,
                     "summary": summary,
-                    "operational_data_requirements": operational_data_requirements.model_dump(
+                    "operational_data_requirements": enforced_requirements.model_dump(
                         mode="python"
                     ),
                 },

@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { api, GeoAgentApiError } from "./api";
 import type { WorkspaceQuestionHistoryMessage, WorkspaceQuestionReference } from "./types";
 
@@ -114,7 +116,9 @@ export function AskGeoAgent({ workspaceId, workspaceName }: { workspaceId: strin
             {messages.map((message) => (
               <article key={message.id} className={`ask-message ask-message-${message.role}`}>
                 <span>{message.role === "user" ? "You" : "GeoAgent"}</span>
-                <p>{message.content}</p>
+                {message.role === "assistant" ? (
+                  <div className="ask-markdown"><Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown></div>
+                ) : <p>{message.content}</p>}
                 {!!message.references?.length && (
                   <div className="ask-references" aria-label="Answer evidence">
                     {message.references.map((reference) => (

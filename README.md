@@ -429,16 +429,30 @@ flowchart TD
     M --> G[Geospatial Intelligence Agent]
     M --> P[Operational Planning and<br/>Validation Agent]
 
-    D --> S[Authorized organizational sources<br/>SQLite via Cloud Storage]
-    G --> X[Google Maps Platform<br/>Routes, Places, Geocoding]
-    P --> O[Deterministic optimization<br/>metrics and validation]
+    M --> MT[Manager tools<br/>load state · ask clarification<br/>request objective decision · publish plan]
+    MT --> F[Firestore<br/>Mission state, plan, safe events<br/>and ADK session]
+
+    D --> DT[Data tools<br/>list authorized sources · inspect schema<br/>read-only query]
+    DT --> S[Authorized organizational sources<br/>SQLite via Cloud Storage]
+
+    G --> GT[Geospatial tools<br/>geocode · place search · routes<br/>route matrix · weather · roads]
+    GT --> X[Google Maps Platform]
+
+    P --> PT[Planning tools<br/>optimize assignments · calculate metrics<br/>validate plan]
+    PT --> O[Deterministic optimization<br/>and constraint checks]
 
     D --> M
     G --> M
     P --> M
-    M --> F[Firestore<br/>Mission state, plan, safe events<br/>and ADK session]
     F --> UI[Command center<br/>map and observability]
 ```
+
+| Tool owner | Tools | Purpose |
+|---|---|---|
+| Mission Manager | `load_mission_state`, `request_clarification`, `request_objective_decision`, `publish_plan` | Loads the isolated Mission, asks the only user question when essential, handles an impossible-objective decision, and is the only agent allowed to publish a plan. |
+| Organizational Data Agent | `list_authorized_sources`, `inspect_source_schema`, `query_source` | Discovers what data is permitted and reads only the facts needed for the objective; it never writes organizational data. |
+| Geospatial Intelligence Agent | `geocode_locations`, `search_places`, `compute_routes`, `compute_route_matrix`, `get_weather_context`, `inspect_roads` | Resolves real-world locations and travel facts, with weather/road context only when relevant to the Mission. |
+| Planning and Validation Agent | `optimize_assignments`, `calculate_plan_metrics`, `validate_plan` | Produces a deterministic feasible allocation, calculates operational totals, and detects hard violations and material risks before publication. |
 
 ```text
 start Mission

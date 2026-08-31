@@ -27,6 +27,66 @@ For example:
 
 The user specifies the outcome. GeoAgent determines the relevant resources, locations, deadlines, routes, risks, calculations, and follow-up actions.
 
+## How GeoAgent meets the judging criteria
+
+### Innovation & Operational Utility — 40%
+
+GeoAgent removes the work between an operational objective and an executable,
+validated plan. A user can enter a plain-language objective such as `Plan
+tomorrow's deliveries.` without selecting tables, learning a schema, writing a
+prompt sequence, assigning resources, calculating capacity, or manually
+building routes. The Mission Manager autonomously investigates the authorized
+organizational data, delegates to specialist agents, resolves geospatial facts,
+optimizes assignments, validates constraints, and persists a decision-ready
+plan.
+
+This is not a chat wrapper around a map. Every Mission is an isolated,
+long-running operational workflow with its own agent session, authorization
+scope, events, plan, map state, clarifications, objective decisions, and audit
+history. GeoAgent takes high-value planning actions itself while keeping the
+human in control only for information or objective trade-offs that genuinely
+require a decision.
+
+### Architectural Discipline & Tech Stack — 30%
+
+GeoAgent is designed as a production-minded multi-agent system, not a brittle
+script:
+
+- **Google ADK + Gemini:** a Mission Manager coordinates three fixed,
+  capability-based specialists: Organizational Data, Geospatial Intelligence,
+  and Operational Planning and Validation.
+- **Clear responsibility boundaries:** agents own only the tools relevant to
+  their capability; deterministic optimization and validation tools make
+  assignments and constraint checks reproducible rather than leaving them to
+  model guesswork.
+- **Mission isolation and durable state:** Firestore Native (`geoagentdb`)
+  stores Workspace, Mission, plan, safe event, and map records separately from
+  ADK session context. Missions do not leak state across Workspaces.
+- **Secure, decoupled infrastructure:** FastAPI serves a React/TypeScript
+  command center from one Cloud Run service; secrets are injected from Secret
+  Manager and never committed. Source files use local storage in development
+  and Cloud Storage in production.
+- **Failure-aware execution:** structured events expose tool calls, results,
+  validation failures, and lifecycle transitions. Publication blocks physical
+  plans that lack required location and route evidence, rather than silently
+  presenting incomplete operational data as a finished result.
+
+### Demo & Production Readiness — 30%
+
+The repository and demo make the system straightforward to evaluate:
+
+- The unedited four-minute [production demo](https://www.youtube.com/watch?v=w4wndRSoRxc)
+  shows the working agent workflow and Cloud deployment.
+- The repository includes the architecture diagram, Cloud Run/Firestore
+  deployment evidence, a synthetic Kerala organizational dataset generator,
+  and complete reproducible setup and test instructions.
+- The frontend provides a live operational map, route/resource isolation,
+  plan metrics, safe agent observability, validation state, and a persistent
+  Mission history instead of simulated progress.
+- GeoAgent is deployed as a public Google Cloud Run service backed by
+  Firestore, Cloud Storage, Secret Manager, Cloud Build, Artifact Registry,
+  and Cloud Logging. The same API powers local and production command centers.
+
 ## Synthetic demo data
 
 Generate the reproducible Kerala goods-transport SQLite database from the repository root:

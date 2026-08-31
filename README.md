@@ -39,8 +39,57 @@ pnpm dev
 
 Set `VITE_API_BASE_URL` to the FastAPI service (local default:
 `http://localhost:8000`) and set `VITE_GOOGLE_MAPS_API_KEY` to a browser key
-restricted to the frontend's HTTP referrer. The map reports a configuration
-state instead of substituting fake geography when the key is absent.
+limited to the Maps JavaScript API. The map reports a configuration state
+instead of substituting fake geography when the key is absent.
+
+### Using the Mission command center
+
+Select a Mission to switch the map and right-side **Mission intelligence**
+panel to that objective. The map shows real locations and returned route
+polylines as they become available; click a location marker to inspect it, and
+click a resource card in **Plan** to highlight that resource's route and stop
+sequence. **All map** returns to the active-Mission overview.
+
+![Completed Mission map and Plan summary](docs/images/mission_intel_ui.png)
+
+The **Plan** tab gives the operational summary: assignment/resource/distance/
+travel-time tiles, availability of locations/routes/validation, the complete
+published plan, and one card per assigned resource. A resource card lists its
+ordered work; selecting it focuses the associated map route.
+
+![Resource schedules in the Plan tab](docs/images/mission_plan_ui.png)
+
+Validation and warnings appear only when they add an operational decision:
+
+- **Validation** exposes hard failures such as an overloaded resource, an
+  unavailable/certification-ineligible resource, a breached shift or customer
+  time window, or an unassigned required task.
+- **Warnings / risks** keep feasible-plan concerns such as traffic leaving no
+  deadline buffer, near-full capacity, severe weather, or an approved deferred
+  non-critical task. Low-signal geocoding notices are kept in agent activity,
+  not presented as an operational risk.
+
+For a completed plan with no hard violations or material risks, the concise
+"All required checks passed" state is shown once in **Operational data**.
+
+The **Agents** tab is the safe live observability view: Manager/specialist
+delegations, model requests, tool calls, structured results, and failures. It
+never exposes private chain-of-thought.
+
+![Mission Agents tab](docs/images/mission_agents_ui.png)
+
+The **History** tab records lifecycle events (creation, start, clarification,
+objective decisions, publishing, and failures) and aggregate/latest-run
+metrics: agent delegations, tool calls, Gemini/model requests and failures,
+runtime, and token totals. It is the audit trail for how the Mission reached
+its present state.
+
+The floating **Ask GeoAgent** panel is Workspace-wide Q&A, not a second
+Mission. Its read-only Master Operations Agent can answer questions across
+persisted Missions about plans, status, validation, safe agent metadata, and
+connected data-source metadata; it cannot modify Missions or read source rows.
+
+![Ask GeoAgent Workspace Q&A](docs/images/mission_chatbot.png)
 
 ## Connect a SQLite source
 
@@ -170,6 +219,28 @@ current feature set.
 builds it from local source. A normal release builds a new immutable image in
 Cloud Build and deploys that image as the next Cloud Run revision; the public
 service URL remains stable and Cloud Run retains prior revisions for rollback.
+
+### Planned extension: scheduled disruption monitoring
+
+This is **not part of the implemented hackathon demo**. For active Missions,
+Google Cloud Scheduler could periodically invoke the Cloud Run backend to run a
+Disruption Monitoring Agent. It would combine Maps/Routes conditions, weather,
+official emergency or news feeds, and authorised organizational-data changes
+into a structured assessment of location, severity, affected resources/routes,
+and expected Mission impact. Material assessments would be passed to the
+Mission Manager for targeted reassessment and replanning; updated state would
+remain in Firestore and uploaded SQLite sources in Cloud Storage.
+
+```text
+Cloud Scheduler → Cloud Run → Disruption Monitoring Agent → live data/tools
+→ structured disruption assessment → Mission Manager → replanning → Firestore
+```
+
+This is scheduler-based periodic monitoring (cron-style), **not event-driven**.
+It is deliberately deferred because a four-minute demo is not a practical
+window to wait for a scheduled check, observe a new disruption, and show the
+resulting autonomous replan. Cloud Scheduler is therefore proposed only; it is
+not one of the Google Cloud services currently used by deployed GeoAgent.
 
 ### Clarification and impossible-Mission decisions
 
@@ -349,6 +420,24 @@ Mission Manager
 ├── Organizational Data Agent
 ├── Geospatial Intelligence Agent
 └── Operational Planning and Validation Agent
+```
+
+```mermaid
+flowchart TD
+    U[Mission objective] --> M[Mission Manager<br/>Google ADK coordinator]
+    M --> D[Organizational Data Agent]
+    M --> G[Geospatial Intelligence Agent]
+    M --> P[Operational Planning and<br/>Validation Agent]
+
+    D --> S[Authorized organizational sources<br/>SQLite via Cloud Storage]
+    G --> X[Google Maps Platform<br/>Routes, Places, Geocoding]
+    P --> O[Deterministic optimization<br/>metrics and validation]
+
+    D --> M
+    G --> M
+    P --> M
+    M --> F[Firestore<br/>Mission state, plan, safe events<br/>and ADK session]
+    F --> UI[Command center<br/>map and observability]
 ```
 
 ```text

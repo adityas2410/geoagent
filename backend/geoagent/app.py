@@ -438,6 +438,7 @@ def _frontend_directory() -> Path:
 
 _frontend_build_directory = _frontend_directory()
 _frontend_index = _frontend_build_directory / "index.html"
+_frontend_index_headers = {"Cache-Control": "no-cache, max-age=0, must-revalidate"}
 
 
 if _frontend_index.is_file():
@@ -449,7 +450,7 @@ if _frontend_index.is_file():
         try:
             requested.relative_to(_frontend_build_directory)
         except ValueError:
-            return FileResponse(_frontend_index)
+            return FileResponse(_frontend_index, headers=_frontend_index_headers)
         if frontend_path and requested.is_file():
             return FileResponse(requested)
-        return FileResponse(_frontend_index)
+        return FileResponse(_frontend_index, headers=_frontend_index_headers)

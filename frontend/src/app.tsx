@@ -455,7 +455,7 @@ export function App() {
           <div className="map-topline">
             <div>
               <span className="eyebrow">{selectedMission ? "Mission geography" : "All active Missions"}</span>
-              <h1>{selectedMission?.name || selectedMission?.objective || "Live operational map"}</h1>
+              <h1>{selectedMission?.objective || selectedMission?.name || "Live operational map"}</h1>
             </div>
             {selectedMission && <StatusBadge status={selectedMission.status} />}
           </div>
@@ -485,7 +485,7 @@ export function App() {
             <EmptyPanel>Select a Mission to inspect its plan, agents, and history.</EmptyPanel>
           ) : (
             <>
-              <div className="detail-header"><div><span className="eyebrow">Mission intelligence</span><h2>{selectedMission.name || "Mission"}</h2></div><button className="mission-menu" onClick={() => setMissionDeleteOpen(true)} aria-label="Mission actions">•••</button></div>
+              <div className="detail-header"><div><span className="eyebrow">Mission intelligence</span><h2>{selectedMission.objective || selectedMission.name || "Mission"}</h2></div><button className="mission-menu" onClick={() => setMissionDeleteOpen(true)} aria-label="Mission actions">•••</button></div>
               <div className="tabs" role="tablist">
                 {(["plan", "agents", "history"] as PanelTab[]).map((tab) => (
                   <button key={tab} className={activeTab === tab ? "active" : ""} onClick={() => setActiveTab(tab)}>{tab}</button>
@@ -554,7 +554,7 @@ function PlanPanel({
     }
     return [...grouped.entries()].map(([resourceId, assignments]) => [resourceId, assignments.sort((a, b) => a.sequence - b.sequence)] as const);
   }, [mapState?.assignments]);
-  const warnings = [...(mapState?.warnings || []), ...(mapState?.validation?.warnings || [])];
+  const warnings = mapState?.validation?.warnings || [];
 
   if (mission.status === "awaiting_input" && mission.clarification?.status === "open") {
     return <div className="decision-panel"><span className="eyebrow">GeoAgent needs additional information</span><h3>{mission.clarification.question}</h3><p>{mission.clarification.reason}</p><textarea disabled={continuing} value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder="Your answer" /><button className="primary-button" disabled={continuing || !answer.trim()} onClick={() => onAnswer(answer.trim())}>{continuing ? <><span className="button-spinner" />Continuing Mission…</> : "Continue Mission"}</button></div>;
@@ -572,8 +572,9 @@ function PlanPanel({
   return <div className="panel-scroll">
     <div className="plan-summary"><StatusBadge status={mission.status} /><p>{mission.summary || "GeoAgent is gathering and validating operational facts."}</p><div className="metric-grid"><Metric label="Assignments" value={assignmentCount(mapState)} status={missionDataStatus("assignments", mapState, mission.status, events)} /><Metric label="Resources" value={availableMetric(mapState, "active_resource_count")} status={missionDataStatus("metrics", mapState, mission.status, events)} /><Metric label="Distance" value={totalDistance === undefined ? undefined : formatDistance(totalDistance)} status={missionDataStatus("metrics", mapState, mission.status, events)} /><Metric label="Travel time" value={totalDuration === undefined ? undefined : formatDuration(totalDuration)} status={missionDataStatus("metrics", mapState, mission.status, events)} /></div></div>
     <OperationalDataPanel mapState={mapState} missionStatus={mission.status} events={events} />
+    {mission.plan && <section className="raw-plan"><h3>Published plan</h3><details open><summary>Complete operational plan</summary><pre>{JSON.stringify(mission.plan, null, 2)}</pre></details></section>}
     {assignmentsByResource.map(([resourceId, assignments]) => <AssignmentCard key={resourceId} resourceId={resourceId} assignments={assignments} active={highlightedResourceId === resourceId} onClick={() => onHighlightResource(highlightedResourceId === resourceId ? null : resourceId)} />)}
-    {mapState?.availability.validation === "available" && mapState.validation && <section className="validation"><h3>Validation</h3><p className={mapState.validation.feasible ? "valid" : "invalid"}>{mapState.validation.feasible ? "Operational requirements validated" : "The plan has unresolved operational requirements"}</p>{(mapState.validation.hard_violations || []).map((issue, index) => <p key={index}>{presentationMessage(issue)}</p>)}</section>}
+    {mapState?.availability.validation === "available" && mapState.validation && (!mapState.validation.feasible || !!mapState.validation.hard_violations?.length) && <section className="validation"><h3>Validation</h3><p className="invalid">The plan has unresolved operational requirements</p>{(mapState.validation.hard_violations || []).map((issue, index) => <p key={index}>{presentationMessage(issue)}</p>)}</section>}
     {!!warnings.length && <section className="warnings"><h3>Warnings / risks</h3>{warnings.map((warning, index) => <p key={index}>{presentationMessage(warning)}</p>)}</section>}
   </div>;
 }

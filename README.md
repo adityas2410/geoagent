@@ -117,6 +117,29 @@ origin and deploy atomically in one revision.
 | Cloud Logging | Captures deployment and runtime logs for operational evidence. |
 | IAM service account | Gives the Cloud Run revision only its Firestore, source-bucket, and required-secret access. |
 
+### Deployed infrastructure evidence
+
+The following screenshots show the deployed Google Cloud resources that support
+the live GeoAgent service.
+
+**Cloud Run service and ready revision**
+
+![GeoAgent Cloud Run services](docs/images/cloudrun_services.png)
+
+![GeoAgent Cloud Run service details](docs/images/cloudrun_servicedetails.png)
+
+**Container image, application state, and source storage**
+
+![GeoAgent Artifact Registry repository](docs/images/artifact_registry_repositories.png)
+
+![GeoAgent Firestore data](docs/images/firestore_studio.png)
+
+![GeoAgent Cloud Storage buckets](docs/images/cloudstorage_buckets.png)
+
+**Runtime observability**
+
+![GeoAgent Cloud Logging](docs/images/observability_logs.png)
+
 The deployed application calls Gemini through Google ADK and calls Google Maps
 Platform APIs for browser maps and mission-specific geospatial work. Browser
 and server Maps keys are separate: the browser key is referrer- and API-

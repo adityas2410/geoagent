@@ -6,7 +6,18 @@ hosted by **Google**. GeoAgent uses Gemini, Google's Agent Development Kit
 
 **GeoAgent** is an autonomous multi-agent system for planning and coordinating real-world operations using organizational data and live geospatial intelligence.
 
-A user connects their operational data, creates a Mission with a simple business objective, and GeoAgent determines how to investigate the available information, evaluate constraints, use geographic context, and produce an operational plan.
+## Problem and value proposition
+
+Operational teams have data scattered across business systems, but turning it
+into a workable plan still means manually interpreting records, resources,
+constraints, locations, travel conditions, and trade-offs. That makes planning
+slow, difficult to audit, and fragile when conditions change.
+
+GeoAgent turns a simple business objective into a validated operational plan.
+A user connects organizational data and creates a Mission; the agent team
+discovers the relevant information, evaluates constraints and geographic
+context, and produces a persistent, explainable plan and map without requiring
+the user to understand schemas, tables, or prompt engineering.
 
 For example:
 
@@ -85,9 +96,10 @@ runtime, and token totals. It is the audit trail for how the Mission reached
 its present state.
 
 The floating **Ask GeoAgent** panel is Workspace-wide Q&A, not a second
-Mission. Its read-only Master Operations Agent can answer questions across
-persisted Missions about plans, status, validation, safe agent metadata, and
-connected data-source metadata; it cannot modify Missions or read source rows.
+Mission. Its Master Operations Agent answers questions across persisted Missions
+about plans, status, validation, safe agent metadata, and connected data-source
+metadata. It can be extended with row-level table access and supervised Mission
+modification workflows.
 
 ![Ask GeoAgent Workspace Q&A](docs/images/mission_chatbot.png)
 
@@ -284,9 +296,8 @@ A completed Mission stores its plan and frontend-safe events in Firestore.
 The floating **Ask GeoAgent** widget uses one read-only ADK Master Operations
 Agent to answer questions across the current Workspace's persisted Missions.
 It can compare lifecycle status, objectives, plans, assignments, metrics,
-validation, warnings, failures, and safe recorded agent activity. It cannot
-query connected organizational sources or create, modify, delete, resume, or
-rerun a Mission.
+validation, warnings, failures, and safe recorded agent activity. Future
+extensions can add row-level table access and supervised Mission modification.
 
 ```text
 POST /api/workspaces/{workspace_id}/questions
@@ -411,7 +422,7 @@ source upload
   -> source_records.py saves source metadata in Firestore
 ```
 
-### Multi-agent Mission flow
+### Multi-Agent System Architecture
 
 Each Mission runs one isolated Google ADK collaborative agent team:
 

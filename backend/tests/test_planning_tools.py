@@ -16,7 +16,13 @@ sys.path.insert(0, str(BACKEND_DIRECTORY))
 from google.adk.tools.function_tool import FunctionTool  # noqa: E402
 from google.auth.exceptions import DefaultCredentialsError  # noqa: E402
 
-from geoagent.agent import PlanningFindings, PlanningRequest, root_agent  # noqa: E402
+from geoagent.agent import (  # noqa: E402
+    PlanningFindings,
+    PlanningRequest,
+    geospatial_intelligence_agent,
+    organizational_data_agent,
+    root_agent,
+)
 from geoagent.planning_tools import calculate_plan_metrics  # noqa: E402
 from geoagent.planning_tools import compose_resources  # noqa: E402
 from geoagent.planning_tools import normalize_operational_rules  # noqa: E402
@@ -466,6 +472,11 @@ class PlanningToolsTest(unittest.TestCase):
     def test_manager_publishes_a_ready_plan_without_extra_follow_up(self) -> None:
         self.assertIn("call publish_plan as your next action", root_agent.instruction)
         self.assertIn("further work to re-check", root_agent.instruction)
+        self.assertIn("one focused delegation", root_agent.instruction)
+        self.assertIn("Do not repeat a", root_agent.instruction)
+        self.assertIn("Batch all required locations", geospatial_intelligence_agent.instruction)
+        self.assertIn("only when the objective or an organizational", geospatial_intelligence_agent.instruction)
+        self.assertIn("Do not retrieve broad source dumps", organizational_data_agent.instruction)
 
 
 @unittest.skipUnless(

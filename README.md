@@ -1,5 +1,8 @@
 # GeoAgent
 
+Built for the **All Things Agentic Hackathon**, hosted by **Google**. GeoAgent
+uses Gemini, Google's Agent Development Kit (ADK), and Google Cloud.
+
 **GeoAgent** is an autonomous multi-agent system for planning and coordinating real-world operations using organizational data and live geospatial intelligence.
 
 A user connects their operational data, creates a Mission with a simple business objective, and GeoAgent determines how to investigate the available information, evaluate constraints, use geographic context, and produce an operational plan.

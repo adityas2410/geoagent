@@ -231,7 +231,7 @@ class MissionMapAvailability(BaseModel):
 
 
 class OperationalDataRequirement(BaseModel):
-    """One safe publication requirement declared by the Mission Manager."""
+    """One publication requirement, with optional supporting context."""
 
     status: Literal["required", "not_applicable"]
     reason: str | None = Field(default=None, max_length=500)
@@ -240,8 +240,6 @@ class OperationalDataRequirement(BaseModel):
     def validate_reason(self) -> OperationalDataRequirement:
         if self.status == "not_applicable" and not (self.reason or "").strip():
             raise ValueError("a not_applicable requirement needs a concise reason")
-        if self.status == "required" and self.reason is not None:
-            raise ValueError("a required requirement cannot include a reason")
         return self
 
 

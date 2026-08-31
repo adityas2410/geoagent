@@ -13,6 +13,8 @@ sys.path.insert(0, str(BACKEND_DIRECTORY))
 sys.path.insert(0, str(BACKEND_DIRECTORY / "demo_data"))
 
 from google.adk.tools.function_tool import FunctionTool  # noqa: E402
+from google.adk.events.event import Event  # noqa: E402
+from google.genai import types  # noqa: E402
 
 from build_demo_db import build_database  # noqa: E402
 from geoagent.mission_manager_tools import load_mission_state  # noqa: E402
@@ -122,6 +124,83 @@ class MissionManagerToolsTest(unittest.IsolatedAsyncioTestCase):
             self.workspace.workspace_id, mission.mission_id
         )
         self.assertEqual(stored.name, "Tomorrow's Operations")
+        self.assertIsNotNone(stored.plan)
+
+    async def test_accepted_replan_publishes_with_required_evidence_notes(self) -> None:
+        """Regression for Test #5's accepted-replan publication failure."""
+
+        test_case = self
+
+        class AcceptedReplanRunner:
+            def __init__(self) -> None:
+                self.service = None
+                self.calls = 0
+                self.publish_result = None
+
+            async def run_async(self, *, user_id, session_id, new_message, run_config):
+                self.calls += 1
+                assert self.service is not None
+                if self.calls == 1:
+                    await self.service.request_objective_decision(
+                        user_id,
+                        session_id,
+                        session_id,
+                        "Complete the feasible delivery work within fleet capacity.",
+                        "Available capacity cannot satisfy every delivery.",
+                        [{"code": "CAPACITY_EXCEEDED"}],
+                    )
+                    text = "Objective decision requested."
+                else:
+                    seed_required_plan_evidence(self.service, user_id, session_id)
+                    requirements = NON_GEOGRAPHIC_REQUIREMENTS.model_dump(mode="json")
+                    for category in ("assignments", "metrics", "validation"):
+                        requirements[category]["reason"] = (
+                            "Required for operational execution."
+                        )
+                    self.publish_result = await FunctionTool(publish_plan).run_async(
+                        args={
+                            "mission_name": "Capacity-Aware Operations",
+                            "summary": "The accepted replan has a validated final plan.",
+                            "plan": {
+                                "assignments": [
+                                    {"task": "JOB-001", "resource": "VEH-001"}
+                                ]
+                            },
+                            "operational_data_requirements": requirements,
+                        },
+                        tool_context=test_case.context(session_id),
+                    )
+                    text = "Plan published."
+                yield Event(
+                    author="mission_manager",
+                    content=types.Content(
+                        role="model", parts=[types.Part.from_text(text=text)]
+                    ),
+                )
+
+        runner = AcceptedReplanRunner()
+        runner.service = self.service
+        self.service.runner = runner
+        mission = await self.service.create_mission(
+            self.workspace.workspace_id,
+            MissionCreate(objective="Plan tomorrow's deliveries."),
+        )
+        waiting = await self.service.run_mission(
+            self.workspace.workspace_id, mission.mission_id
+        )
+        self.assertEqual(waiting.status, "awaiting_objective_decision")
+
+        completed = await self.service.accept_objective_decision(
+            self.workspace.workspace_id, mission.mission_id
+        )
+
+        self.assertEqual(runner.calls, 2)
+        self.assertEqual(runner.publish_result["status"], "completed")
+        stored = await self.service.require_mission(
+            self.workspace.workspace_id, mission.mission_id
+        )
+        self.assertEqual(completed.status, "completed")
+        self.assertEqual(stored.status, "completed")
         self.assertIsNotNone(stored.plan)
 
     async def test_request_objective_decision(self) -> None:
